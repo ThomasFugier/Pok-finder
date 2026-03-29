@@ -1,18 +1,13 @@
 import {
   DEFAULT_SETTINGS,
-  DISPLAY_MODE_OPTIONS,
-  ENABLED_GENERATIONS,
-  GENERATION_OPTIONS,
-  LANGUAGE_OPTIONS,
   MAX_PLAYERS,
-  SCORING_MODE_OPTIONS,
   RESULTS_DURATION_MS,
-  ROUND_OPTIONS,
-  TIMER_OPTIONS_SEC,
   VOTING_DURATION_MS
 } from "./config.js";
 import { createPlayerId, createRoomId, normalizeAnswer, similarityScore } from "./utils.js";
 import pokemonData from "./data/pokemon_all.json" with { type: "json" };
+import { getPokemonPool as getPokemonPoolFromList } from "../../shared/pokemonUtils.js";
+import { sanitizeSettings as sanitizeSettingsShared } from "../../shared/settings.js";
 
 function now() {
   return Date.now();
@@ -20,21 +15,8 @@ function now() {
 
 const FIRST_ROUND_REVEAL_DELAY_MS = 3000;
 
-function getPokemonGeneration(pokemonId) {
-  if (pokemonId <= 151) return 1;
-  if (pokemonId <= 251) return 2;
-  if (pokemonId <= 386) return 3;
-  if (pokemonId <= 493) return 4;
-  if (pokemonId <= 649) return 5;
-  if (pokemonId <= 721) return 6;
-  if (pokemonId <= 809) return 7;
-  if (pokemonId <= 905) return 8;
-  return 9;
-}
-
 function getPokemonPool(selectedGenerations = [1]) {
-  const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
-  return pool.length ? pool : pokemonData;
+  return getPokemonPoolFromList(pokemonData, selectedGenerations);
 }
 
 function publicPlayer(player) {
@@ -51,39 +33,7 @@ function publicPlayer(player) {
 }
 
 function sanitizeSettings(nextSettings = {}, fallback = DEFAULT_SETTINGS) {
-  const rounds = ROUND_OPTIONS.includes(nextSettings.rounds)
-    ? nextSettings.rounds
-    : fallback.rounds;
-  const language = LANGUAGE_OPTIONS.includes(nextSettings.language)
-    ? nextSettings.language
-    : fallback.language;
-  const displayMode = DISPLAY_MODE_OPTIONS.includes(nextSettings.displayMode)
-    ? nextSettings.displayMode
-    : (DISPLAY_MODE_OPTIONS.includes(nextSettings.mode) ? nextSettings.mode : fallback.displayMode);
-  const scoringMode = SCORING_MODE_OPTIONS.includes(nextSettings.scoringMode)
-    ? nextSettings.scoringMode
-    : (SCORING_MODE_OPTIONS.includes(nextSettings.mode) ? nextSettings.mode : fallback.scoringMode);
-  const roundDurationSec = TIMER_OPTIONS_SEC.includes(nextSettings.roundDurationSec)
-    ? nextSettings.roundDurationSec
-    : fallback.roundDurationSec;
-
-  const requestedGenerations = Array.isArray(nextSettings.generations)
-    ? nextSettings.generations
-    : fallback.generations;
-  const generations = requestedGenerations
-    .filter((value) => Number.isInteger(value) && GENERATION_OPTIONS.includes(value) && ENABLED_GENERATIONS.includes(value));
-  const fallbackGenerations = Array.isArray(fallback.generations)
-    ? fallback.generations.filter((value) => ENABLED_GENERATIONS.includes(value))
-    : [];
-
-  return {
-    rounds,
-    language,
-    displayMode,
-    scoringMode,
-    roundDurationSec,
-    generations: generations.length ? generations : (fallbackGenerations.length ? fallbackGenerations : [ENABLED_GENERATIONS[0]])
-  };
+  return sanitizeSettingsShared(nextSettings, fallback);
 }
 
 export class GameEngine {
@@ -132,7 +82,6 @@ export class GameEngine {
       phaseEndsAt: null,
       roundTimer: null,
       phaseTimer: null,
-      ticker: null,
       isPaused: false,
       pausedRemainingMs: 0,
       recentRoundResults: [],
@@ -690,16 +639,12 @@ export class GameEngine {
     room.phaseTimer = null;
   }
 
-  clearTicker(room) {
-    clearInterval(room.ticker);
-    room.ticker = null;
+  clearTicker(_room) {
+    // Tick updates are computed client-side from timestamps.
   }
 
-  setTicker(room) {
-    this.clearTicker(room);
-    room.ticker = setInterval(() => {
-      this.broadcastRoom(room);
-    }, 1000);
+  setTicker(_room) {
+    // Intentionally no-op to avoid full-state broadcasts every second.
   }
 
   buildPublicState(room, viewerPlayerId = null) {

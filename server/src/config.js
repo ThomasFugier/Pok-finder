@@ -1,23 +1,28 @@
+import {
+  DEFAULT_SETTINGS,
+  DISPLAY_MODE_OPTIONS,
+  ENABLED_GENERATIONS,
+  GENERATION_OPTIONS,
+  LANGUAGE_OPTIONS,
+  RESULTS_DURATION_MS,
+  ROUND_OPTIONS,
+  SCORING_MODE_OPTIONS,
+  TIMER_OPTIONS_SEC,
+  VOTING_DURATION_MS
+} from "../../shared/gameConstants.js";
+
+export { DEFAULT_SETTINGS };
+export { DISPLAY_MODE_OPTIONS };
+export { ENABLED_GENERATIONS };
+export { GENERATION_OPTIONS };
+export { LANGUAGE_OPTIONS };
+export { RESULTS_DURATION_MS };
+export { ROUND_OPTIONS };
+export { SCORING_MODE_OPTIONS };
+export { TIMER_OPTIONS_SEC };
+export { VOTING_DURATION_MS };
+
 export const MAX_PLAYERS = 8;
-export const RESULTS_DURATION_MS = 60000;
-export const VOTING_DURATION_MS = 12000;
-
-export const ROUND_OPTIONS = [10, 20, 50];
-export const TIMER_OPTIONS_SEC = [10, 15, 30, 45, 60];
-export const LANGUAGE_OPTIONS = ["en", "fr"];
-export const DISPLAY_MODE_OPTIONS = ["normal", "whosthat"];
-export const SCORING_MODE_OPTIONS = ["exact", "voting", "approx"];
-export const GENERATION_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-export const ENABLED_GENERATIONS = [...GENERATION_OPTIONS];
-
-export const DEFAULT_SETTINGS = {
-  rounds: 10,
-  language: "en",
-  displayMode: "normal",
-  scoringMode: "approx",
-  roundDurationSec: 30,
-  generations: [1]
-};
 
 export const AVATARS = [
   "red",

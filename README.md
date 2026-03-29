@@ -7,6 +7,7 @@ A fullstack real-time multiplayer browser game inspired by party guessing games,
 - Frontend: React + Vite + Zustand + Socket.IO client
 - Backend: Node.js + Express + Socket.IO
 - Realtime sync: room state, rounds, timer, scores, votes
+- Shared domain logic: `shared/` modules reused by client and server
 
 ## Local solo fallback
 
@@ -35,6 +36,7 @@ Tip: you can run `launch-client-static.bat --check` to only validate the build.
 
 - `client` - React application
 - `server` - Express + Socket.IO server
+- `shared` - common game rules/utilities (settings, scoring, Pokemon helpers)
 
 ## Local development
 
@@ -46,6 +48,10 @@ Tip: you can run `launch-client-static.bat --check` to only validate the build.
 3. Run frontend:
    - `cd client && npm run dev`
 4. Open the frontend URL shown by Vite.
+
+## Tests
+
+- Server unit tests: `cd server && npm test`
 
 ## Environment
 
