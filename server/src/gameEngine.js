@@ -30,6 +30,11 @@ function getPokemonGeneration(pokemonId) {
   return 9;
 }
 
+function getPokemonPool(selectedGenerations = [1]) {
+  const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
+  return pool.length ? pool : pokemonData;
+}
+
 function publicPlayer(player) {
   return {
     id: player.id,
@@ -117,6 +122,7 @@ export class GameEngine {
       roundIndex: 0,
       totalRounds: settings.rounds,
       currentPokemon: null,
+      usedPokemonIds: [],
       answers: {},
       votes: {},
       roundEndsAt: null,
@@ -124,6 +130,8 @@ export class GameEngine {
       roundTimer: null,
       phaseTimer: null,
       ticker: null,
+      isPaused: false,
+      pausedRemainingMs: 0,
       recentRoundResults: [],
       winners: []
     };
@@ -269,6 +277,10 @@ export class GameEngine {
   }
 
   handlePresenceChange(room) {
+    if (room.isPaused) {
+      return false;
+    }
+
     const connectedPlayers = room.players.filter((p) => p.connected);
 
     if (!connectedPlayers.length) {
@@ -341,9 +353,16 @@ export class GameEngine {
     if (!connectedPlayers.every((p) => p.isReady)) {
       return { error: "All players must be ready" };
     }
+    const poolSize = getPokemonPool(room.settings.generations || [1]).length;
+    if (room.totalRounds > poolSize) {
+      return { error: `Not enough unique Pokemon for ${room.totalRounds} rounds with selected generations` };
+    }
 
     room.state = "round";
     room.roundIndex = 0;
+    room.usedPokemonIds = [];
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
     room.players.forEach((p) => {
       p.score = 0;
       p.isReady = false;
@@ -364,17 +383,77 @@ export class GameEngine {
     return { ok: true };
   }
 
+  togglePause(roomId, playerId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: "Room not found" };
+    if (room.hostId !== playerId) return { error: "Only host can pause" };
+    if (!["round", "voting", "roundResults"].includes(room.state)) {
+      return { error: "Cannot pause in this phase" };
+    }
+
+    if (!room.isPaused) {
+      const remainingMs = room.state === "round"
+        ? Math.max(0, (room.roundEndsAt || now()) - now())
+        : Math.max(0, (room.phaseEndsAt || now()) - now());
+
+      room.isPaused = true;
+      room.pausedRemainingMs = remainingMs;
+      room.roundEndsAt = room.state === "round" ? null : room.roundEndsAt;
+      room.phaseEndsAt = room.state !== "round" ? null : room.phaseEndsAt;
+
+      clearTimeout(room.roundTimer);
+      clearTimeout(room.phaseTimer);
+      room.roundTimer = null;
+      room.phaseTimer = null;
+      this.clearTicker(room);
+      this.broadcastRoom(room);
+      return { ok: true, paused: true };
+    }
+
+    const remainingMs = Math.max(0, room.pausedRemainingMs || 0);
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
+
+    if (room.state === "round") {
+      room.roundEndsAt = now() + remainingMs;
+      clearTimeout(room.roundTimer);
+      room.roundTimer = setTimeout(() => {
+        this.finishRound(room.id);
+      }, remainingMs);
+    } else if (room.state === "voting") {
+      room.phaseEndsAt = now() + remainingMs;
+      clearTimeout(room.phaseTimer);
+      room.phaseTimer = setTimeout(() => {
+        this.finalizeVoting(room.id);
+      }, remainingMs);
+    } else if (room.state === "roundResults") {
+      room.phaseEndsAt = now() + remainingMs;
+      clearTimeout(room.phaseTimer);
+      room.phaseTimer = setTimeout(() => {
+        this.advanceGame(room.id);
+      }, remainingMs);
+    }
+
+    this.setTicker(room);
+    this.broadcastRoom(room);
+    return { ok: true, paused: false };
+  }
+
   startRound(room) {
     // Each round picks a random Pokemon from the generations enabled in settings.
     room.roundIndex += 1;
     room.state = "round";
-    const selectedGenerations = room.settings.generations || [1];
-    const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
-    const roundPool = pool.length ? pool : pokemonData;
-    room.currentPokemon = roundPool[Math.floor(Math.random() * roundPool.length)];
+    const pool = getPokemonPool(room.settings.generations || [1]);
+    const usedSet = new Set(room.usedPokemonIds || []);
+    const available = pool.filter((pokemon) => !usedSet.has(pokemon.id));
+    const source = available.length ? available : pool;
+    room.currentPokemon = source[Math.floor(Math.random() * source.length)];
+    room.usedPokemonIds = [...(room.usedPokemonIds || []), room.currentPokemon.id];
     room.answers = {};
     room.votes = {};
     room.recentRoundResults = [];
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
 
     room.players.forEach((p) => {
       p.hasSubmitted = false;
@@ -447,6 +526,8 @@ export class GameEngine {
     });
 
     room.recentRoundResults = results;
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
 
     if (room.settings.scoringMode === "voting") {
       // Voting mode pauses score awarding until players validate answers.
@@ -468,6 +549,8 @@ export class GameEngine {
     }
 
     room.state = "roundResults";
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
     room.phaseEndsAt = now() + RESULTS_DURATION_MS;
     clearTimeout(room.phaseTimer);
     room.phaseTimer = setTimeout(() => {
@@ -529,6 +612,8 @@ export class GameEngine {
     }
 
     room.state = "roundResults";
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
     room.phaseEndsAt = now() + RESULTS_DURATION_MS;
     room.phaseTimer = setTimeout(() => {
       this.advanceGame(room.id);
@@ -548,6 +633,8 @@ export class GameEngine {
       room.state = "finalResults";
       room.winners = [...room.players].sort((a, b) => b.score - a.score);
       room.phaseEndsAt = null;
+      room.isPaused = false;
+      room.pausedRemainingMs = 0;
       this.clearTicker(room);
       this.broadcastRoom(room);
       return;
@@ -565,6 +652,7 @@ export class GameEngine {
     room.state = "lobby";
     room.roundIndex = 0;
     room.currentPokemon = null;
+    room.usedPokemonIds = [];
     room.answers = {};
     room.votes = {};
     room.recentRoundResults = [];
@@ -576,6 +664,8 @@ export class GameEngine {
       p.answer = "";
       p.score = 0;
     });
+    room.isPaused = false;
+    room.pausedRemainingMs = 0;
     this.broadcastRoom(room);
     return { room };
   }
@@ -617,6 +707,8 @@ export class GameEngine {
       hostId: room.hostId,
       settings: room.settings,
       state: room.state,
+      isPaused: room.isPaused,
+      pausedRemainingMs: room.isPaused ? room.pausedRemainingMs : 0,
       roundIndex: room.roundIndex,
       totalRounds: room.totalRounds,
       roundEndsAt: room.roundEndsAt,

@@ -129,6 +129,17 @@ io.on("connection", (socket) => {
     ack?.({ ok: true });
   });
 
+  socket.on("game:togglePause", (payload, ack) => {
+    const roomId = (payload?.roomId || "").toUpperCase();
+    const playerId = payload?.playerId;
+    const result = engine.togglePause(roomId, playerId);
+    if (result?.error) {
+      ack?.({ ok: false, error: result.error });
+      return;
+    }
+    ack?.({ ok: true, paused: !!result.paused });
+  });
+
   socket.on("answer:submit", (payload, ack) => {
     const roomId = (payload?.roomId || "").toUpperCase();
     const playerId = payload?.playerId;

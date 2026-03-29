@@ -41,8 +41,8 @@ const AVATAR_ASSETS = {
 const AVATARS = Object.keys(AVATAR_ASSETS);
 
 const DISPLAY_MODE_LABELS = {
-  normal: { en: "Normal", fr: "Normal" },
-  whosthat: { en: "Who's that Pokemon mode", fr: "Who's that Pokemon mode" }
+  normal: "Normal",
+  whosthat: "Who's that Pokemon mode"
 };
 
 const ROUND_OPTIONS = [10, 20, 50];
@@ -69,15 +69,69 @@ const LANGUAGE_LABELS = {
 };
 
 const DISPLAY_MODE_PICKER_LABELS = {
-  normal: { fr: "Normal", en: "Normal" },
-  whosthat: { fr: "Silhouette", en: "Silhouette" }
+  normal: "Normal",
+  whosthat: "Silhouette"
 };
 
 const SCORING_MODE_PICKER_LABELS = {
-  exact: { fr: "Exact", en: "Exact" },
-  voting: { fr: "Vote", en: "Voting" },
-  approx: { fr: "Approx", en: "Approx" }
+  exact: "Exact",
+  voting: "Voting",
+  approx: "Approx"
 };
+
+const SETTINGS_TOOLTIPS = {
+  rounds: "How many Pokemon rounds will be played in this match.",
+  language: "Language used for Pokemon names during gameplay.",
+  generations: "Choose which Pokemon generations are included in the match.",
+  displayMode: "Normal shows the Pokemon directly. Silhouette hides its colors.",
+  scoring: "Exact: all-or-nothing, Approx: typo-tolerant, Voting: players validate answers.",
+  timer: "Time available to submit your answer each round."
+};
+
+const LANGUAGE_OPTION_TOOLTIPS = {
+  en: "Pokemon names will be expected in English.",
+  fr: "Pokemon names will be expected in French."
+};
+
+const DISPLAY_MODE_OPTION_TOOLTIPS = {
+  normal: "Pokemon appears in full color immediately.",
+  whosthat: "Pokemon appears as a silhouette first, like the anime reveal."
+};
+
+const SCORING_OPTION_TOOLTIPS = {
+  exact: "Only exact spelling gets points.",
+  approx: "Close spelling gives partial points.",
+  voting: "Players vote to validate each answer before points are awarded."
+};
+
+const CONFETTI_COLORS = ["#ffd166", "#ff5d8f", "#39d98a", "#45b5ff", "#f59e0b", "#22c55e", "#f43f5e", "#d946ef"];
+
+function randomConfettiPiece(idPrefix, index, { burst = false } = {}) {
+  const size = 6 + Math.random() * 10;
+  const left = `${Math.random() * 100}%`;
+  const color = CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)];
+  const drift = `${(Math.random() * 120) - 60}px`;
+  const spin = `${(Math.random() * 900) + 520}deg`;
+  const delay = burst ? `${Math.random() * 0.16}s` : `${Math.random() * 5.8}s`;
+  const duration = burst ? `${1.9 + Math.random() * 1.3}s` : `${5.8 + Math.random() * 4.5}s`;
+  const shapeRoll = Math.random();
+  const shape = shapeRoll < 0.7 ? "rect" : (shapeRoll < 0.9 ? "ribbon" : "dot");
+
+  return {
+    id: `${idPrefix}-${index}`,
+    shape,
+    burst,
+    style: {
+      "--left": left,
+      "--size": `${size}px`,
+      "--color": color,
+      "--drift": drift,
+      "--spin": spin,
+      "--delay": delay,
+      "--duration": duration
+    }
+  };
+}
 
 function sanitizeSettings(nextSettings = {}, fallback = DEFAULT_SETTINGS) {
   const rounds = ROUND_OPTIONS.includes(nextSettings.rounds) ? nextSettings.rounds : fallback.rounds;
@@ -281,22 +335,34 @@ function getPokemonGeneration(pokemonId) {
   return 9;
 }
 
-function pickRandomPokemon(selectedGenerations = [1]) {
+function getPokemonPool(selectedGenerations = [1]) {
   const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
-  const roundPool = pool.length ? pool : pokemonData;
-  return roundPool[Math.floor(Math.random() * roundPool.length)];
+  return pool.length ? pool : pokemonData;
+}
+
+function pickRandomPokemon(selectedGenerations = [1], usedPokemonIds = []) {
+  const pool = getPokemonPool(selectedGenerations);
+  const usedSet = new Set(usedPokemonIds);
+  const available = pool.filter((pokemon) => !usedSet.has(pokemon.id));
+  const source = available.length ? available : pool;
+  return source[Math.floor(Math.random() * source.length)];
 }
 
 function startLocalRound(room) {
   const players = clonePlayers(room.players).map((p) => ({ ...p, hasSubmitted: false, answer: "" }));
+  const pickedPokemon = pickRandomPokemon(room.settings.generations, room.usedPokemonIds || []);
+  const nextUsedPokemonIds = [...(room.usedPokemonIds || []), pickedPokemon.id];
   return {
     ...room,
     state: "round",
     roundIndex: room.roundIndex + 1,
     players,
-    currentPokemon: pickRandomPokemon(room.settings.generations),
+    currentPokemon: pickedPokemon,
+    usedPokemonIds: nextUsedPokemonIds,
     roundEndsAt: Date.now() + (room.settings.roundDurationSec * 1000),
     phaseEndsAt: null,
+    isPaused: false,
+    pausedRemainingMs: 0,
     expectedName: null,
     recentRoundResults: [],
     votes: {}
@@ -335,6 +401,8 @@ function finishLocalRound(room) {
     expectedName: expected,
     roundEndsAt: null,
     phaseEndsAt: Date.now() + RESULTS_DURATION_MS,
+    isPaused: false,
+    pausedRemainingMs: 0,
     recentRoundResults
   };
 }
@@ -347,6 +415,8 @@ function advanceLocalGame(room) {
       ...room,
       state: "finalResults",
       phaseEndsAt: null,
+      isPaused: false,
+      pausedRemainingMs: 0,
       winners
     };
   }
@@ -364,6 +434,8 @@ function createLocalRoom({ playerId, nickname, avatar, settings }) {
     totalRounds: initialSettings.rounds,
     roundEndsAt: null,
     phaseEndsAt: null,
+    isPaused: false,
+    pausedRemainingMs: 0,
     expectedName: null,
     players: [
       {
@@ -381,6 +453,7 @@ function createLocalRoom({ playerId, nickname, avatar, settings }) {
     currentPokemon: null,
     recentRoundResults: [],
     votes: {},
+    usedPokemonIds: [],
     winners: []
   };
 }
@@ -594,6 +667,7 @@ function App() {
 
   useEffect(() => {
     if (!isLocalRoom || !room) return;
+    if (room.isPaused) return;
     if (room.state === "round" && room.roundEndsAt && now >= room.roundEndsAt) {
       setRoom(finishLocalRound(room));
       return;
@@ -615,6 +689,23 @@ function App() {
     });
     return () => cancelAnimationFrame(focusId);
   }, [room?.state, room?.roundIndex, me?.hasSubmitted]);
+
+  useEffect(() => {
+    if (room?.state !== "roundResults" || !isHost) return;
+
+    const onKeyDown = (event) => {
+      if (event.key !== "Enter") return;
+      if (event.repeat) return;
+      const targetTag = event.target?.tagName?.toLowerCase();
+      if (targetTag === "input" || targetTag === "textarea") return;
+      if (event.target?.isContentEditable) return;
+      event.preventDefault();
+      nextRoundNow();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [room?.state, isHost, nextRoundNow]);
 
   useEffect(() => {
     if (room?.state === "lobby" && room?.settings) {
@@ -708,7 +799,7 @@ function App() {
     const roomCode = targetRoomId.toUpperCase();
     const baseUrl = window.location.origin;
     const joinUrl = `${baseUrl}/?room=${encodeURIComponent(roomCode)}`;
-    const inviteText = `Come play with me on Pokefinder Party!\nRoom code: ${roomCode}\n${joinUrl}`;
+    const inviteText = `Come play with me on Poké Party Quiz!\nRoom code: ${roomCode}\n${joinUrl}`;
 
     try {
       if (navigator.clipboard?.writeText) {
@@ -758,15 +849,21 @@ function App() {
 
   async function startGame() {
     if (!room) return;
-    const connectedPlayers = room.players.filter((p) => p.connected);
-    if (!connectedPlayers.every((p) => p.isReady)) {
-      setError("All players must be ready");
+
+    if (isLocalRoom) {
+      const poolSize = getPokemonPool(room.settings.generations).length;
+      if (room.settings.rounds > poolSize) {
+        setError(`Not enough unique Pokemon for ${room.settings.rounds} rounds with current generations`);
+        return;
+      }
+      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, isReady: false, hasSubmitted: false, answer: "" }));
+      setRoom(startLocalRound({ ...room, players, roundIndex: 0, winners: [], usedPokemonIds: [] }));
       return;
     }
 
-    if (isLocalRoom) {
-      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, isReady: false, hasSubmitted: false, answer: "" }));
-      setRoom(startLocalRound({ ...room, players, roundIndex: 0, winners: [] }));
+    const connectedPlayers = room.players.filter((p) => p.connected);
+    if (!connectedPlayers.every((p) => p.isReady)) {
+      setError("All players must be ready");
       return;
     }
 
@@ -785,6 +882,43 @@ function App() {
 
     const res = await emitAck("game:nextRound", { roomId: room.id, playerId });
     if (!res.ok) setError(res.error || "Failed to go next");
+  }
+
+  async function togglePauseGame() {
+    if (!room || !isHost) return;
+    if (!["round", "voting", "roundResults"].includes(room.state)) return;
+
+    if (isLocalRoom) {
+      if (!room.isPaused) {
+        const remainingMs = room.state === "round"
+          ? Math.max(0, (room.roundEndsAt || Date.now()) - Date.now())
+          : Math.max(0, (room.phaseEndsAt || Date.now()) - Date.now());
+        setRoom({
+          ...room,
+          isPaused: true,
+          pausedRemainingMs: remainingMs,
+          roundEndsAt: room.state === "round" ? null : room.roundEndsAt,
+          phaseEndsAt: room.state !== "round" ? null : room.phaseEndsAt
+        });
+        return;
+      }
+
+      const remainingMs = Math.max(0, room.pausedRemainingMs || 0);
+      setRoom({
+        ...room,
+        isPaused: false,
+        pausedRemainingMs: 0,
+        roundEndsAt: room.state === "round" ? Date.now() + remainingMs : room.roundEndsAt,
+        phaseEndsAt: room.state !== "round" ? Date.now() + remainingMs : room.phaseEndsAt
+      });
+      return;
+    }
+
+    const res = await emitAck("game:togglePause", {
+      roomId: room.id,
+      playerId
+    });
+    if (!res.ok) setError(res.error || "Failed to toggle pause");
   }
 
   async function submitAnswer() {
@@ -820,12 +954,19 @@ function App() {
           ? { ...result, voteAccepted: accepted, awardedScore: accepted ? result.provisionalScore : 0 }
           : result
       ));
+      const nextVotes = {
+        ...(room.votes || {}),
+        [targetPlayerId]: {
+          ...((room.votes || {})[targetPlayerId] || {}),
+          [playerId]: accepted
+        }
+      };
       const nextPlayers = clonePlayers(room.players).map((p) => {
         const result = nextResults.find((r) => r.playerId === p.id);
         if (!result) return p;
         return { ...p, score: result.awardedScore };
       });
-      setRoom({ ...room, recentRoundResults: nextResults, players: nextPlayers });
+      setRoom({ ...room, recentRoundResults: nextResults, votes: nextVotes, players: nextPlayers });
       return;
     }
 
@@ -872,9 +1013,12 @@ function App() {
         currentPokemon: null,
         roundEndsAt: null,
         phaseEndsAt: null,
+        isPaused: false,
+        pausedRemainingMs: 0,
         expectedName: null,
         recentRoundResults: [],
         winners: [],
+        usedPokemonIds: [],
         players
       });
       return;
@@ -909,19 +1053,14 @@ function App() {
   const timerTotalMs = room?.state === "round"
     ? (room.settings.roundDurationSec * 1000)
     : (room?.state === "voting" ? VOTING_DURATION_MS : RESULTS_DURATION_MS);
-  const timerRemainingMs = room?.state === "round" ? roundMs : phaseMs;
+  const liveRemainingMs = room?.state === "round" ? roundMs : phaseMs;
+  const timerRemainingMs = room?.isPaused ? Math.max(0, room?.pausedRemainingMs || 0) : liveRemainingMs;
   const timerProgress = Math.max(0, Math.min(1, timerRemainingMs / Math.max(1, timerTotalMs)));
   const timerFillProgress = 1 - timerProgress;
-  const timerLabel = room?.state === "round"
-    ? `${Math.ceil(timerRemainingMs / 1000)}`
-    : (room?.state === "voting"
-      ? `${Math.ceil(timerRemainingMs / 1000)}`
-      : (room?.state === "roundResults"
-        ? `${Math.ceil(timerRemainingMs / 1000)}`
-        : "0"));
+  const timerLabel = room?.isPaused ? "PAUSED" : `${Math.ceil(timerRemainingMs / 1000)}`;
   const canEditSettings = !isInLobby || isHost;
   const roomDisplayLabel = room
-    ? (DISPLAY_MODE_LABELS[room.settings.displayMode]?.[room.settings.language] || DISPLAY_MODE_LABELS.normal.en)
+    ? (DISPLAY_MODE_LABELS[room.settings.displayMode] || DISPLAY_MODE_LABELS.normal)
     : "";
   const roomGenerationsLabel = room
     ? `Gen ${[...(room.settings.generations || [1])].sort((a, b) => a - b).join(", ")}`
@@ -937,6 +1076,19 @@ function App() {
   const readyPlayersCount = room ? room.players.filter((p) => p.isReady && p.connected).length : 0;
   const connectedPlayersCount = room ? room.players.filter((p) => p.connected).length : 0;
   const allConnectedReady = room ? connectedPlayersCount > 0 && readyPlayersCount === connectedPlayersCount : false;
+  const canPauseGame = !!(room && isHost && ["round", "voting", "roundResults"].includes(room.state));
+  const isTimerVisible = !!room && (room.state === "round" || room.state === "voting" || room.state === "roundResults");
+  const timerActionLabel = room?.state === "roundResults"
+    ? "Next"
+    : (room?.isPaused ? "Resume" : "Pause");
+  const confettiPieces = useMemo(() => {
+    if (room?.state !== "finalResults") return null;
+
+    const backFlow = Array.from({ length: 92 }, (_, i) => randomConfettiPiece("back-flow", i));
+    const frontFlow = Array.from({ length: 36 }, (_, i) => randomConfettiPiece("front-flow", i));
+
+    return { backFlow, frontFlow };
+  }, [room?.state, room?.id, room?.roundIndex]);
 
   if (!roomId || !playerId || !room || room.state === "lobby") {
     return (
@@ -944,7 +1096,7 @@ function App() {
         <section className="party-shell ultra-menu">
           <header className="menu-topbar">
             <div className="brand-block">
-              <h1>Pokefinder Party</h1>
+              <h1>Poké Party Quiz</h1>
             </div>
             <div className="menu-status">
               <span className={serverOnline ? "status-pill online" : "status-pill offline"}>
@@ -993,7 +1145,7 @@ function App() {
               <div className="settings">
                 <div className="setting-block range-setting">
                   <div className="setting-head">
-                    <span>Rounds</span>
+                    <span className="has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.rounds}>Rounds</span>
                     <strong>{formSettings.rounds}</strong>
                   </div>
                   <input
@@ -1008,19 +1160,22 @@ function App() {
                   />
                   <div className="range-stops">
                     {ROUND_OPTIONS.map((value) => (
-                      <span key={value} className={value === formSettings.rounds ? "active" : ""}>{value}</span>
+                      <span key={value} className={`${value === formSettings.rounds ? "active" : ""} has-tooltip`.trim()} data-tooltip={`${value} rounds`}>
+                        {value}
+                      </span>
                     ))}
                   </div>
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Language</span>
+                  <span className="setting-title has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.language}>Language</span>
                   <div className="toggle-group">
                     {LANGUAGE_OPTIONS.map((value) => (
                       <button
                         key={value}
                         type="button"
-                        className={value === formSettings.language ? "toggle-pill active" : "toggle-pill"}
+                        className={`${value === formSettings.language ? "toggle-pill active" : "toggle-pill"} has-tooltip`.trim()}
+                        data-tooltip={LANGUAGE_OPTION_TOOLTIPS[value]}
                         onClick={() => applyMenuSettings({ language: value })}
                         disabled={!canEditSettings}
                       >
@@ -1031,7 +1186,7 @@ function App() {
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Generation</span>
+                  <span className="setting-title has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.generations}>Generation</span>
                   <div className="toggle-group generations">
                     {GENERATION_OPTIONS.map((value) => {
                       const isSelected = formSettings.generations.includes(value);
@@ -1040,7 +1195,8 @@ function App() {
                         <button
                           key={value}
                           type="button"
-                          className={isSelected ? "toggle-pill active" : "toggle-pill"}
+                          className={`${isSelected ? "toggle-pill active" : "toggle-pill"} has-tooltip`.trim()}
+                          data-tooltip={`Include Pokemon from Generation ${value}.`}
                           onClick={() => {
                             if (!isEnabled) return;
                             if (isSelected && formSettings.generations.length === 1) return;
@@ -1059,34 +1215,36 @@ function App() {
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Display mode</span>
+                  <span className="setting-title has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.displayMode}>Display mode</span>
                   <div className="toggle-group">
                     {DISPLAY_MODE_OPTIONS.map((value) => (
                       <button
                         key={value}
                         type="button"
-                        className={value === formSettings.displayMode ? "toggle-pill active" : "toggle-pill"}
+                        className={`${value === formSettings.displayMode ? "toggle-pill active" : "toggle-pill"} has-tooltip`.trim()}
+                        data-tooltip={DISPLAY_MODE_OPTION_TOOLTIPS[value]}
                         onClick={() => applyMenuSettings({ displayMode: value })}
                         disabled={!canEditSettings}
                       >
-                        {DISPLAY_MODE_PICKER_LABELS[value]?.[formSettings.language] || value}
+                        {DISPLAY_MODE_PICKER_LABELS[value] || value}
                       </button>
                     ))}
                   </div>
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Scoring</span>
+                  <span className="setting-title has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.scoring}>Scoring</span>
                   <div className="toggle-group three">
                     {SCORING_MODE_OPTIONS.map((value) => (
                       <button
                         key={value}
                         type="button"
-                        className={value === formSettings.scoringMode ? "toggle-pill active" : "toggle-pill"}
+                        className={`${value === formSettings.scoringMode ? "toggle-pill active" : "toggle-pill"} has-tooltip`.trim()}
+                        data-tooltip={SCORING_OPTION_TOOLTIPS[value]}
                         onClick={() => applyMenuSettings({ scoringMode: value })}
                         disabled={!canEditSettings}
                       >
-                        {SCORING_MODE_PICKER_LABELS[value]?.[formSettings.language] || value}
+                        {SCORING_MODE_PICKER_LABELS[value] || value}
                       </button>
                     ))}
                   </div>
@@ -1094,7 +1252,7 @@ function App() {
 
                 <div className="setting-block range-setting">
                   <div className="setting-head">
-                    <span>Timer</span>
+                    <span className="has-tooltip" data-tooltip={SETTINGS_TOOLTIPS.timer}>Timer</span>
                     <strong>{formSettings.roundDurationSec}s</strong>
                   </div>
                   <input
@@ -1109,7 +1267,13 @@ function App() {
                   />
                   <div className="range-stops">
                     {TIMER_OPTIONS_SEC.map((value) => (
-                      <span key={value} className={value === formSettings.roundDurationSec ? "active" : ""}>{value}s</span>
+                      <span
+                        key={value}
+                        className={`${value === formSettings.roundDurationSec ? "active" : ""} has-tooltip`.trim()}
+                        data-tooltip={`${value} seconds per round`}
+                      >
+                        {value}s
+                      </span>
                     ))}
                   </div>
                 </div>
@@ -1153,7 +1317,7 @@ function App() {
                       .slice()
                       .sort((a, b) => b.score - a.score)
                       .map((p) => (
-                        <li key={p.id}>
+                        <li key={p.id} className={p.isReady ? "ready" : "not-ready"}>
                           <span className="player-badge">
                             <img
                               className="avatar-image"
@@ -1163,25 +1327,29 @@ function App() {
                             />
                           </span>
                           <strong>{p.nickname}</strong>
-                          <span>{p.isReady ? "Ready" : "Not ready"}</span>
+                          <span className={p.isReady ? "ready-pill" : "not-ready-pill"}>
+                            {isLocalRoom ? (p.isHost ? "Host" : "Player") : (p.isReady ? "Ready" : "Not ready")}
+                          </span>
                         </li>
                       ))}
                   </ul>
                   <div className="cta-row lobby-actions">
-                    <button className={me?.isReady ? "primary" : ""} onClick={toggleReadyState}>
-                      {me?.isReady ? "Unready" : "Ready"}
-                    </button>
+                    {!isLocalRoom ? (
+                      <button className={me?.isReady ? "primary" : ""} onClick={toggleReadyState}>
+                        {me?.isReady ? "Unready" : "Ready"}
+                      </button>
+                    ) : null}
                     <button onClick={quitRoom}>Leave</button>
                     {room.id !== "LOCAL" ? (
                       <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>Copy room link</button>
                     ) : null}
                     {isHost ? (
-                      <button className="primary big-cta" onClick={startGame} disabled={!allConnectedReady}>Start game</button>
+                      <button className="primary big-cta" onClick={startGame} disabled={!isLocalRoom && !allConnectedReady}>Start game</button>
                     ) : (
                       <button className="big-cta" disabled>Start game</button>
                     )}
                   </div>
-                  <p className="waiting-text">Ready players: {readyPlayersCount}/{connectedPlayersCount}</p>
+                  {!isLocalRoom ? <p className="waiting-text">Ready players: {readyPlayersCount}/{connectedPlayersCount}</p> : null}
                   {inviteCopied ? <p className="waiting-text">Invite copied</p> : null}
                   {!isHost ? <p className="waiting-text">Waiting for host...</p> : null}
                 </div>
@@ -1197,13 +1365,28 @@ function App() {
 
   return (
     <main
-      className={`page page-room ${room.state === "round" ? "round-active-screen" : ""} ${room.state === "roundResults" ? "results-screen" : ""}`.trim()}
+      className={`page page-room ${room.state === "round" ? "round-active-screen" : ""} ${room.state === "roundResults" ? "results-screen" : ""} ${room.state === "finalResults" ? "final-screen" : ""}`.trim()}
     >
+      {room.state === "finalResults" && confettiPieces ? (
+        <>
+          <div className="confetti-layer confetti-back" aria-hidden="true">
+            {confettiPieces.backFlow.map((piece) => (
+              <span key={piece.id} className={`confetti-piece ${piece.shape} flow`} style={piece.style} />
+            ))}
+          </div>
+          <div className="confetti-layer confetti-front" aria-hidden="true">
+            {confettiPieces.frontFlow.map((piece) => (
+              <span key={piece.id} className={`confetti-piece ${piece.shape} flow`} style={piece.style} />
+            ))}
+          </div>
+        </>
+      ) : null}
+
       <header className="topbar card">
         <button className="quit-btn" onClick={quitRoom}>Leave</button>
         {room.state !== "finalResults" ? (
           <div className="top-salon">
-            <h3>Salon ({room.players.length}/8)</h3>
+            <h3>Room ({room.players.length}/8)</h3>
             <ul className="top-salon-list">
               {sortedPlayers.map((p, index) => (
                 <li key={p.id} className={`${!p.connected ? "disconnected" : ""} ${p.id === playerId ? "me" : ""}`.trim()}>
@@ -1291,6 +1474,8 @@ function App() {
             <div className="votes">
               {room.recentRoundResults.map((result) => {
                 const mine = result.playerId === playerId;
+                const targetVotes = room.votes?.[result.playerId] || {};
+                const eligibleVoters = room.players.filter((p) => p.id !== result.playerId && p.connected);
                 return (
                   <article key={result.playerId} className="vote-card">
                     <div className="vote-head">
@@ -1306,6 +1491,18 @@ function App() {
                         <button onClick={() => submitVote(result.playerId, false)}>Reject</button>
                       </div>
                     )}
+                    <div className="vote-state-grid">
+                      {eligibleVoters.map((voter) => {
+                        const vote = targetVotes[voter.id];
+                        const stateLabel = vote === true ? "YES" : (vote === false ? "NO" : "PENDING");
+                        const stateClass = vote === true ? "yes" : (vote === false ? "no" : "pending");
+                        return (
+                          <span key={`${result.playerId}-${voter.id}`} className={`vote-state-chip ${stateClass}`}>
+                            {voter.nickname}: {stateLabel}
+                          </span>
+                        );
+                      })}
+                    </div>
                   </article>
                 );
               })}
@@ -1315,62 +1512,82 @@ function App() {
 
         {room.state === "roundResults" && (
           <section className="card panel panel-results fade-in">
-            <h3>Results</h3>
+            <h3>Answer</h3>
             <div key={`reveal-${room.roundIndex}`} className="result-pokemon-reveal">
               <img src={room.currentPokemon?.sprite} alt={room.expectedName || "Pokemon"} loading="lazy" />
               <p className="reveal-name">{room.expectedName}</p>
             </div>
-            <ul className="result-list">
-              {room.recentRoundResults.map((result) => (
-                <li key={result.playerId}>
-                  <span className="result-main">{result.nickname}: {result.answer || "(no answer)"}</span>
-                  <span className="result-side">
-                    <span className="result-accuracy">{result.exact ? "Exact" : `${result.provisionalScore}%`}</span>
-                    <strong>+{result.awardedScore}</strong>
+            <div className="result-table-card">
+              <ul className="result-list">
+                {room.recentRoundResults.map((result) => (
+                  <li key={result.playerId}>
+                    <span className="result-main">{result.nickname}: {result.answer || "(no answer)"}</span>
+                    <span className="result-side">
+                      <span className="result-accuracy">{result.exact ? "Exact" : `${result.provisionalScore}%`}</span>
+                      <strong>+{result.awardedScore}</strong>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        )}
+
+        {room.state === "finalResults" && (
+          <section className="card panel panel-final fade-in">
+            <div className="final-title-wrap">
+              <h3>Hall Of Fame</h3>
+            </div>
+            <ol className="leaderboard">
+              {room.winners.map((p, index) => (
+                <li
+                  key={p.id}
+                  className={index === 0 ? "top-1" : (index === 1 ? "top-2" : (index === 2 ? "top-3" : ""))}
+                  style={{ "--rank-index": index }}
+                >
+                  <span className="leader-rank">#{index + 1}</span>
+                  <span className={index === 0 ? "leader-name winner" : "leader-name"}>
+                    {index === 0 ? <span className="winner-crown" aria-hidden="true">👑</span> : null}
+                    <span>{p.nickname}</span>
                   </span>
+                  <strong>{p.score} pts</strong>
                 </li>
               ))}
-            </ul>
-            <div className="panel-actions">
+            </ol>
+
+            <div className="final-footer">
+              <p className="panel-subtitle final-note">Session complete. Start a new lobby for another run.</p>
               {isHost ? (
-                <button className="primary" onClick={nextRoundNow}>Next</button>
+                <button className="primary" onClick={returnToLobby}>Back to lobby</button>
               ) : (
                 <p>Waiting for host...</p>
               )}
             </div>
           </section>
         )}
-
-        {room.state === "finalResults" && (
-          <section className="card panel fade-in">
-            <h3>Final ranking</h3>
-            <p className="panel-subtitle">Session complete. Start a new lobby for another run.</p>
-            <ol className="leaderboard">
-              {room.winners.map((p, index) => (
-                <li key={p.id}>
-                  <span className="leader-rank">#{index + 1}</span>
-                  <span>{p.nickname}</span>
-                  <strong>{p.score} pts</strong>
-                </li>
-              ))}
-            </ol>
-
-            {isHost ? (
-              <button className="primary" onClick={returnToLobby}>Back to lobby</button>
-            ) : (
-              <p>Waiting for host...</p>
-            )}
-          </section>
-        )}
       </section>
 
-      {(room.state === "round" || room.state === "voting" || room.state === "roundResults") ? (
+      {isTimerVisible ? (
         <section className="card timer-banner timer-dock" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timerFillProgress * 100)}>
-          <div className="timer-banner-head">
-            <span>{timerLabel}</span>
-          </div>
-          <div className="timer-track">
-            <div className="timer-fill" style={{ width: `${timerFillProgress * 100}%` }} />
+          <div className="timer-row">
+            <div className="timer-main">
+              <div className="timer-banner-head">
+                <span>{timerLabel}</span>
+              </div>
+              <div className="timer-track">
+                <div className="timer-fill" style={{ width: `${timerFillProgress * 100}%` }} />
+              </div>
+            </div>
+            {canPauseGame ? (
+              <button
+                className="pause-btn timer-action-btn"
+                onClick={room.state === "roundResults" ? nextRoundNow : togglePauseGame}
+              >
+                {timerActionLabel}
+              </button>
+            ) : (
+              room.state === "roundResults" ? <span className="timer-action-note">Waiting for host...</span> : null
+            )}
           </div>
         </section>
       ) : null}
