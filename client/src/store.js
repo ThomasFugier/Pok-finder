@@ -5,7 +5,7 @@ export const useGameStore = create((set) => ({
   roomId: "",
   playerId: "",
   nickname: "",
-  avatar: "pikachu",
+  avatar: "red",
   error: "",
   setError: (error) => set({ error }),
   setIdentity: ({ roomId, playerId, nickname, avatar }) =>
@@ -17,7 +17,7 @@ export const useGameStore = create((set) => ({
       roomId: "",
       playerId: "",
       nickname: "",
-      avatar: "pikachu",
+      avatar: "red",
       error: ""
     })
 }));

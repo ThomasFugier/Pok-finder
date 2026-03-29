@@ -1,6 +1,8 @@
 import {
   DEFAULT_SETTINGS,
   DISPLAY_MODE_OPTIONS,
+  ENABLED_GENERATIONS,
+  GENERATION_OPTIONS,
   LANGUAGE_OPTIONS,
   MAX_PLAYERS,
   SCORING_MODE_OPTIONS,
@@ -14,6 +16,18 @@ import pokemonData from "./data/pokemon151.json" with { type: "json" };
 
 function now() {
   return Date.now();
+}
+
+function getPokemonGeneration(pokemonId) {
+  if (pokemonId <= 151) return 1;
+  if (pokemonId <= 251) return 2;
+  if (pokemonId <= 386) return 3;
+  if (pokemonId <= 493) return 4;
+  if (pokemonId <= 649) return 5;
+  if (pokemonId <= 721) return 6;
+  if (pokemonId <= 809) return 7;
+  if (pokemonId <= 905) return 8;
+  return 9;
 }
 
 function publicPlayer(player) {
@@ -45,7 +59,23 @@ function sanitizeSettings(nextSettings = {}, fallback = DEFAULT_SETTINGS) {
     ? nextSettings.roundDurationSec
     : fallback.roundDurationSec;
 
-  return { rounds, language, displayMode, scoringMode, roundDurationSec };
+  const requestedGenerations = Array.isArray(nextSettings.generations)
+    ? nextSettings.generations
+    : fallback.generations;
+  const generations = requestedGenerations
+    .filter((value) => Number.isInteger(value) && GENERATION_OPTIONS.includes(value) && ENABLED_GENERATIONS.includes(value));
+  const fallbackGenerations = Array.isArray(fallback.generations)
+    ? fallback.generations.filter((value) => ENABLED_GENERATIONS.includes(value))
+    : [];
+
+  return {
+    rounds,
+    language,
+    displayMode,
+    scoringMode,
+    roundDurationSec,
+    generations: generations.length ? generations : (fallbackGenerations.length ? fallbackGenerations : [ENABLED_GENERATIONS[0]])
+  };
 }
 
 export class GameEngine {
@@ -311,10 +341,13 @@ export class GameEngine {
   }
 
   startRound(room) {
-    // Each round picks a random Pokemon from the local static 151 dataset.
+    // Each round picks a random Pokemon from the generations enabled in settings.
     room.roundIndex += 1;
     room.state = "round";
-    room.currentPokemon = pokemonData[Math.floor(Math.random() * pokemonData.length)];
+    const selectedGenerations = room.settings.generations || [1];
+    const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
+    const roundPool = pool.length ? pool : pokemonData;
+    room.currentPokemon = roundPool[Math.floor(Math.random() * roundPool.length)];
     room.answers = {};
     room.votes = {};
     room.recentRoundResults = [];

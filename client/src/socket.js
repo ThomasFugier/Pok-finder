@@ -12,6 +12,8 @@ function resolveServerUrl() {
 
 const SERVER_URL = resolveServerUrl();
 
+export { SERVER_URL };
+
 export const socket = io(SERVER_URL, {
   autoConnect: false,
   transports: ["websocket"]
@@ -32,4 +34,25 @@ export function emitAck(event, payload, timeoutMs = 3000) {
       resolve(response || { ok: false, error: "No response" });
     });
   });
+}
+
+export async function checkServerHealth(timeoutMs = 2500) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${SERVER_URL}/health`, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    if (!response.ok) return false;
+    const payload = await response.json();
+    return payload?.ok === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }

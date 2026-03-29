@@ -1,28 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { emitAck, socket } from "./socket";
+import { checkServerHealth, emitAck, socket } from "./socket";
 import { useGameStore } from "./store";
 import pokemonData from "./data/pokemon151.json";
 
-const AVATARS = [
-  "pikachu",
-  "bulbasaur",
-  "charmander",
-  "squirtle",
-  "eevee",
-  "jigglypuff",
-  "meowth",
-  "psyduck"
-];
+const AVATAR_ASSETS = {
+  red: {
+    label: "Red",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/red.png"
+  },
+  prof_oak: {
+    label: "Prof. Chen",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/oak.png"
+  },
+  misty: {
+    label: "Misty",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/misty.png"
+  },
+  brock: {
+    label: "Brock",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/brock.png"
+  },
+  team_rocket: {
+    label: "Team Rocket",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/teamrocket.png"
+  },
+  rocket_grunt: {
+    label: "Rocket Grunt",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/rocketgrunt.png"
+  },
+  giovanni: {
+    label: "Giovanni",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/giovanni.png"
+  },
+  cynthia: {
+    label: "Cynthia",
+    image: "https://play.pokemonshowdown.com/sprites/trainers/cynthia.png"
+  }
+};
+
+const AVATARS = Object.keys(AVATAR_ASSETS);
 
 const DISPLAY_MODE_LABELS = {
   normal: { en: "Normal", fr: "Normal" },
-  whosthat: { en: "Who's that Pokemon mode", fr: "Qui est ce Pokémon?" }
-};
-
-const SCORING_MODE_LABELS = {
-  exact: "Exact",
-  voting: "Voting",
-  approx: "Approximation"
+  whosthat: { en: "Who's that Pokemon mode", fr: "Who's that Pokemon mode" }
 };
 
 const ROUND_OPTIONS = [10, 20, 50];
@@ -30,18 +50,21 @@ const TIMER_OPTIONS_SEC = [10, 15, 30, 45, 60];
 const LANGUAGE_OPTIONS = ["en", "fr"];
 const DISPLAY_MODE_OPTIONS = ["normal", "whosthat"];
 const SCORING_MODE_OPTIONS = ["exact", "voting", "approx"];
-const RESULTS_DURATION_MS = 7000;
+const GENERATION_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const ENABLED_GENERATIONS = [1];
+const RESULTS_DURATION_MS = 60000;
 const VOTING_DURATION_MS = 12000;
 const DEFAULT_SETTINGS = {
   rounds: 10,
-  language: "fr",
+  language: "en",
   displayMode: "normal",
   scoringMode: "approx",
-  roundDurationSec: 10
+  roundDurationSec: 30,
+  generations: [1]
 };
 
 const LANGUAGE_LABELS = {
-  fr: "Francais",
+  fr: "French",
   en: "English"
 };
 
@@ -68,7 +91,23 @@ function sanitizeSettings(nextSettings = {}, fallback = DEFAULT_SETTINGS) {
   const roundDurationSec = TIMER_OPTIONS_SEC.includes(nextSettings.roundDurationSec)
     ? nextSettings.roundDurationSec
     : fallback.roundDurationSec;
-  return { rounds, language, displayMode, scoringMode, roundDurationSec };
+  const requestedGenerations = Array.isArray(nextSettings.generations)
+    ? nextSettings.generations
+    : fallback.generations;
+  const generations = requestedGenerations
+    .filter((value) => Number.isInteger(value) && GENERATION_OPTIONS.includes(value) && ENABLED_GENERATIONS.includes(value));
+  const fallbackGenerations = Array.isArray(fallback.generations)
+    ? fallback.generations.filter((value) => ENABLED_GENERATIONS.includes(value))
+    : [];
+
+  return {
+    rounds,
+    language,
+    displayMode,
+    scoringMode,
+    roundDurationSec,
+    generations: generations.length ? generations : (fallbackGenerations.length ? fallbackGenerations : [ENABLED_GENERATIONS[0]])
+  };
 }
 
 function getLocalIdentity() {
@@ -86,6 +125,20 @@ function setLocalIdentity(value) {
 
 function clearLocalIdentity() {
   localStorage.removeItem("pokefinder.identity");
+}
+
+function getLocalSetupSettings() {
+  try {
+    const raw = localStorage.getItem("pokefinder.setupSettings");
+    if (!raw) return DEFAULT_SETTINGS;
+    return sanitizeSettings(JSON.parse(raw), DEFAULT_SETTINGS);
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function setLocalSetupSettings(value) {
+  localStorage.setItem("pokefinder.setupSettings", JSON.stringify(value));
 }
 
 function timeLeftMs(ts, currentNow) {
@@ -142,8 +195,14 @@ function clonePlayers(players) {
   return players.map((p) => ({ ...p }));
 }
 
-function avatarTag(value) {
-  return (value || "??").slice(0, 2).toUpperCase();
+function getAvatarAsset(avatarId) {
+  return AVATAR_ASSETS[avatarId] || AVATAR_ASSETS[AVATARS[0]];
+}
+
+function pickRandomAvatar(excludeAvatarId) {
+  const pool = AVATARS.filter((id) => id !== excludeAvatarId);
+  if (!pool.length) return AVATARS[0];
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function getRoundTargetName(room) {
@@ -158,18 +217,31 @@ function buildAnswerMaskTemplate(targetName) {
     .join("");
 }
 
-function buildAnswerMaskDisplay(template, typedValue) {
+function buildAnswerMaskTokens(template, typedValue) {
   let typedIndex = 0;
   const typedChars = Array.from(typedValue || "");
+  const activeSlotIndex = typedChars.length;
+  let slotIndex = 0;
 
   return Array.from(template)
     .map((slot) => {
-      if (slot !== "_") return slot;
+      if (slot !== "_") {
+        return {
+          char: slot,
+          isCurrent: false
+        };
+      }
+
       const nextChar = typedChars[typedIndex];
+      const token = {
+        char: nextChar ? nextChar.toUpperCase() : "_",
+        isCurrent: !nextChar && slotIndex === activeSlotIndex
+      };
+
       typedIndex += 1;
-      return nextChar ? nextChar.toUpperCase() : "_";
-    })
-    .join("");
+      slotIndex += 1;
+      return token;
+    });
 }
 
 function countAnswerSlots(template) {
@@ -197,8 +269,22 @@ function hydrateAnswerFromTemplate(template, typedValue) {
   return output.trim();
 }
 
-function pickRandomPokemon() {
-  return pokemonData[Math.floor(Math.random() * pokemonData.length)];
+function getPokemonGeneration(pokemonId) {
+  if (pokemonId <= 151) return 1;
+  if (pokemonId <= 251) return 2;
+  if (pokemonId <= 386) return 3;
+  if (pokemonId <= 493) return 4;
+  if (pokemonId <= 649) return 5;
+  if (pokemonId <= 721) return 6;
+  if (pokemonId <= 809) return 7;
+  if (pokemonId <= 905) return 8;
+  return 9;
+}
+
+function pickRandomPokemon(selectedGenerations = [1]) {
+  const pool = pokemonData.filter((pokemon) => selectedGenerations.includes(getPokemonGeneration(pokemon.id)));
+  const roundPool = pool.length ? pool : pokemonData;
+  return roundPool[Math.floor(Math.random() * roundPool.length)];
 }
 
 function startLocalRound(room) {
@@ -208,7 +294,7 @@ function startLocalRound(room) {
     state: "round",
     roundIndex: room.roundIndex + 1,
     players,
-    currentPokemon: pickRandomPokemon(),
+    currentPokemon: pickRandomPokemon(room.settings.generations),
     roundEndsAt: Date.now() + (room.settings.roundDurationSec * 1000),
     phaseEndsAt: null,
     expectedName: null,
@@ -307,6 +393,10 @@ function useNowTick() {
   return now;
 }
 
+function easeOutCubic(value) {
+  return 1 - ((1 - value) ** 3);
+}
+
 function PokemonCanvas({ sprite, hidden }) {
   const ref = useRef(null);
 
@@ -315,19 +405,78 @@ function PokemonCanvas({ sprite, hidden }) {
     const canvas = ref.current;
     const ctx = canvas.getContext("2d");
     const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const pixelBuffer = document.createElement("canvas");
+    const pixelCtx = pixelBuffer.getContext("2d");
+    let frameId = null;
+    let cancelled = false;
 
-      if (hidden) {
+    const drawFrame = ({ pixelFactor, maskOpacity, offsetY, distortFactor }) => {
+      const width = canvas.width;
+      const height = canvas.height;
+      const fit = width * 0.86;
+      const ratio = img.width / img.height;
+      const baseWidth = ratio >= 1 ? fit : fit * ratio;
+      const baseHeight = ratio >= 1 ? fit / ratio : fit;
+      const drawWidth = baseWidth * (1 + (0.2 * distortFactor));
+      const drawHeight = baseHeight * (1 - (0.14 * distortFactor));
+      const wobbleX = Math.sin((1 - distortFactor) * Math.PI * 3) * 4 * distortFactor;
+      const x = ((width - drawWidth) / 2) + wobbleX;
+      const y = (height - drawHeight) / 2 + offsetY;
+
+      const sampleWidth = Math.max(1, Math.round(drawWidth * pixelFactor));
+      const sampleHeight = Math.max(1, Math.round(drawHeight * pixelFactor));
+      pixelBuffer.width = sampleWidth;
+      pixelBuffer.height = sampleHeight;
+      pixelCtx.clearRect(0, 0, sampleWidth, sampleHeight);
+      pixelCtx.imageSmoothingEnabled = false;
+      pixelCtx.drawImage(img, 0, 0, sampleWidth, sampleHeight);
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(pixelBuffer, x, y, drawWidth, drawHeight);
+      ctx.imageSmoothingEnabled = true;
+
+      if (maskOpacity > 0) {
         ctx.globalCompositeOperation = "source-atop";
-        ctx.fillStyle = "#06080f";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = `rgba(6, 8, 15, ${maskOpacity})`;
+        ctx.fillRect(x, y, drawWidth, drawHeight);
         ctx.globalCompositeOperation = "source-over";
       }
     };
+
+    const animateReveal = (timestamp, startTime) => {
+      if (cancelled) return;
+      const elapsed = timestamp - startTime;
+      const revealDurationMs = 1000;
+      const travelProgress = Math.min(1, elapsed / revealDurationMs);
+      const pixelProgress = Math.min(1, elapsed / revealDurationMs);
+      const maskProgress = Math.min(1, elapsed / revealDurationMs);
+
+      const offsetY = (1 - easeOutCubic(travelProgress)) * 34;
+      const pixelFactor = 0.03 + (0.97 * easeOutCubic(pixelProgress));
+      const maskOpacity = hidden ? 1 : (1 - easeOutCubic(maskProgress));
+      const distortFactor = 1 - easeOutCubic(pixelProgress);
+
+      drawFrame({ pixelFactor, maskOpacity, offsetY, distortFactor });
+
+      if (travelProgress < 1 || pixelProgress < 1 || (!hidden && maskProgress < 1)) {
+        frameId = requestAnimationFrame((nextTs) => animateReveal(nextTs, startTime));
+        return;
+      }
+
+      drawFrame({ pixelFactor: 1, maskOpacity: hidden ? 1 : 0, offsetY: 0, distortFactor: 0 });
+    };
+
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      frameId = requestAnimationFrame((ts) => animateReveal(ts, ts));
+    };
     img.src = sprite;
+
+    return () => {
+      cancelled = true;
+      if (frameId) cancelAnimationFrame(frameId);
+    };
   }, [sprite, hidden]);
 
   return <canvas className="pokemon-canvas" width="220" height="220" ref={ref} />;
@@ -350,10 +499,19 @@ function App() {
 
   const [formName, setFormName] = useState(nickname || "");
   const [formAvatar, setFormAvatar] = useState(avatar || AVATARS[0]);
-  const [formSettings, setFormSettings] = useState({ ...DEFAULT_SETTINGS });
-  const [joinRoomId, setJoinRoomId] = useState("");
+  const [formSettings, setFormSettings] = useState(() => getLocalSetupSettings());
+  const [joinRoomId, setJoinRoomId] = useState(() => {
+    try {
+      const value = new URLSearchParams(window.location.search).get("room") || "";
+      return value.toUpperCase().slice(0, 5);
+    } catch {
+      return "";
+    }
+  });
   const [answer, setAnswer] = useState("");
-  const [serverOnline, setServerOnline] = useState(null);
+  const [serverOnline, setServerOnline] = useState(false);
+  const [serverChecking, setServerChecking] = useState(true);
+  const [inviteCopied, setInviteCopied] = useState(false);
   const answerInputRef = useRef(null);
 
   const me = useMemo(() => room?.players?.find((p) => p.id === playerId), [room, playerId]);
@@ -367,6 +525,26 @@ function App() {
       setIdentity(identity);
     }
   }, [setIdentity]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const runHealthCheck = async () => {
+      setServerChecking(true);
+      const online = await checkServerHealth();
+      if (cancelled) return;
+      setServerOnline(online);
+      setServerChecking(false);
+    };
+
+    runHealthCheck();
+    const intervalId = setInterval(runHealthCheck, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     socket.connect();
@@ -384,6 +562,7 @@ function App() {
 
     socket.on("connect", async () => {
       setServerOnline(true);
+      setServerChecking(false);
       const identity = getLocalIdentity();
       if (identity?.roomId && identity?.playerId && identity.roomId !== "LOCAL") {
         setIdentity(identity);
@@ -442,6 +621,10 @@ function App() {
     }
   }, [room?.state, room?.settings]);
 
+  useEffect(() => {
+    setLocalSetupSettings(formSettings);
+  }, [formSettings]);
+
   function applyMenuSettings(partial) {
     const nextSettings = sanitizeSettings({ ...formSettings, ...partial }, DEFAULT_SETTINGS);
     setFormSettings(nextSettings);
@@ -489,6 +672,11 @@ function App() {
   }
 
   async function createRoom() {
+    if (!serverOnline) {
+      setError("Server unavailable");
+      return;
+    }
+
     const cleanName = (formName || "Player").slice(0, 20);
     const settings = sanitizeSettings(formSettings, DEFAULT_SETTINGS);
     const previous = getLocalIdentity();
@@ -511,6 +699,35 @@ function App() {
     };
     setIdentity(identity);
     setLocalIdentity(identity);
+  }
+
+  async function copyRoomInvite(targetRoomId = room?.id) {
+    if (!targetRoomId || targetRoomId === "LOCAL") return;
+
+    const roomCode = targetRoomId.toUpperCase();
+    const baseUrl = window.location.origin;
+    const joinUrl = `${baseUrl}/?room=${encodeURIComponent(roomCode)}`;
+    const inviteText = `Come play with me on Pokefinder Party!\nRoom code: ${roomCode}\n${joinUrl}`;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(inviteText);
+      } else {
+        const temp = document.createElement("textarea");
+        temp.value = inviteText;
+        temp.setAttribute("readonly", "true");
+        temp.style.position = "fixed";
+        temp.style.opacity = "0";
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand("copy");
+        document.body.removeChild(temp);
+      }
+      setInviteCopied(true);
+      setTimeout(() => setInviteCopied(false), 1800);
+    } catch {
+      setError("Failed to copy room link");
+    }
   }
 
   async function joinRoom() {
@@ -667,36 +884,29 @@ function App() {
     : (room?.state === "voting" ? VOTING_DURATION_MS : RESULTS_DURATION_MS);
   const timerRemainingMs = room?.state === "round" ? roundMs : phaseMs;
   const timerProgress = Math.max(0, Math.min(1, timerRemainingMs / Math.max(1, timerTotalMs)));
+  const timerFillProgress = 1 - timerProgress;
   const timerLabel = room?.state === "round"
-    ? `Temps restant ${Math.ceil(timerRemainingMs / 1000)}s`
+    ? `${Math.ceil(timerRemainingMs / 1000)}`
     : (room?.state === "voting"
-      ? `Vote ${Math.ceil(timerRemainingMs / 1000)}s`
+      ? `${Math.ceil(timerRemainingMs / 1000)}`
       : (room?.state === "roundResults"
-        ? `Auto suivant ${Math.ceil(timerRemainingMs / 1000)}s`
-        : "Partie terminee"));
+        ? `${Math.ceil(timerRemainingMs / 1000)}`
+        : "0"));
   const canEditSettings = !isInLobby || isHost;
   const roomDisplayLabel = room
     ? (DISPLAY_MODE_LABELS[room.settings.displayMode]?.[room.settings.language] || DISPLAY_MODE_LABELS.normal.en)
     : "";
-  const roomScoringLabel = room
-    ? (SCORING_MODE_LABELS[room.settings.scoringMode] || SCORING_MODE_LABELS.exact)
+  const roomGenerationsLabel = room
+    ? `Gen ${[...(room.settings.generations || [1])].sort((a, b) => a - b).join(", ")}`
     : "";
   const roundIndexValue = Math.max(0, ROUND_OPTIONS.indexOf(formSettings.rounds));
   const timerIndexValue = Math.max(0, TIMER_OPTIONS_SEC.indexOf(formSettings.roundDurationSec));
   const answerMaskTemplate = buildAnswerMaskTemplate(getRoundTargetName(room));
   const answerSlotsCount = countAnswerSlots(answerMaskTemplate);
-  const answerMaskDisplay = buildAnswerMaskDisplay(answerMaskTemplate, answer);
-  const roundProgress = room ? Math.max(0, Math.min(1, room.roundIndex / Math.max(1, room.totalRounds))) : 0;
-  const submittedAnswersCount = room?.state === "round"
-    ? room.players.filter((p) => p.hasSubmitted).length
-    : 0;
-  const phaseLabel = room?.state === "round"
-    ? "Scan actif"
-    : (room?.state === "voting"
-      ? "Validation equipe"
-      : (room?.state === "roundResults"
-        ? "Debrief manche"
-        : "Classement final"));
+  const answerMaskTokens = buildAnswerMaskTokens(answerMaskTemplate, answer);
+  const sortedPlayers = room?.players
+    ? room.players.slice().sort((a, b) => b.score - a.score)
+    : [];
 
   if (!roomId || !playerId || !room || room.state === "lobby") {
     return (
@@ -707,39 +917,49 @@ function App() {
               <h1>Pokefinder Party</h1>
             </div>
             <div className="menu-status">
-              <span className={serverOnline === false ? "status-pill offline" : "status-pill online"}>
-                {serverOnline === false ? "Serveur hors ligne" : "Serveur en ligne"}
+              <span className={serverOnline ? "status-pill online" : "status-pill offline"}>
+                <span className={serverOnline ? "network-icon online" : "network-icon offline"} aria-hidden="true" />
+                <span>{serverOnline ? "Server online" : "Server offline"}</span>
+                {serverChecking ? <span className="status-spinner" aria-hidden="true" /> : null}
               </span>
-              {isInLobby ? <p className="room-code">Code actif : {room.id}</p> : null}
+              {isInLobby ? <p className="room-code">Active code: {room.id}</p> : null}
             </div>
           </header>
 
           <div className="menu-tile-grid">
             <section className="menu-tile playopedia">
-              <h3>Profil dresseur</h3>
-              <label>
-                Pseudo
-                <input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Ton pseudo" />
-              </label>
-              <div className="avatar-picker-head">
-                <span className="label">Avatar</span>
-                <span className="avatar-preview">{avatarTag(formAvatar)}</span>
-              </div>
-              <div className="avatar-grid">
-                {AVATARS.map((id) => (
-                  <button
-                    key={id}
-                    className={id === formAvatar ? "avatar active" : "avatar"}
-                    onClick={() => setFormAvatar(id)}
-                  >
-                    {avatarTag(id)}
-                  </button>
-                ))}
+              <h3>Trainer profile</h3>
+              <div className="profile-identity">
+                <div className="profile-avatar-picker">
+                  <div className="profile-avatar-shell">
+                    <span className="avatar-preview profile-avatar">
+                      <img
+                        className="avatar-image"
+                        src={getAvatarAsset(formAvatar).image}
+                        alt={getAvatarAsset(formAvatar).label}
+                        loading="lazy"
+                      />
+                    </span>
+                    <button
+                      type="button"
+                      className="avatar-random-btn"
+                      onClick={() => setFormAvatar((previous) => pickRandomAvatar(previous))}
+                      aria-label="Change avatar"
+                      title="Change avatar"
+                    >
+                      <span aria-hidden="true">⇄</span>
+                    </button>
+                  </div>
+                </div>
+                <label className="profile-name-field">
+                  What's your name?
+                  <input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Your nickname" />
+                </label>
               </div>
             </section>
 
             <section className="menu-tile crew">
-              <h3>Parametres de partie</h3>
+              <h3>Game settings</h3>
               <div className="settings">
                 <div className="setting-block range-setting">
                   <div className="setting-head">
@@ -764,7 +984,7 @@ function App() {
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Langue</span>
+                  <span className="setting-title">Language</span>
                   <div className="toggle-group">
                     {LANGUAGE_OPTIONS.map((value) => (
                       <button
@@ -781,7 +1001,36 @@ function App() {
                 </div>
 
                 <div className="setting-block">
-                  <span className="setting-title">Affichage</span>
+                  <span className="setting-title">Generation</span>
+                  <div className="toggle-group generations">
+                    {GENERATION_OPTIONS.map((value) => {
+                      const isSelected = formSettings.generations.includes(value);
+                      const isEnabled = ENABLED_GENERATIONS.includes(value);
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          className={isSelected ? "toggle-pill active" : "toggle-pill"}
+                          onClick={() => {
+                            if (!isEnabled) return;
+                            if (isSelected && formSettings.generations.length === 1) return;
+                            const nextGenerations = isSelected
+                              ? formSettings.generations.filter((item) => item !== value)
+                              : [...formSettings.generations, value];
+                            applyMenuSettings({ generations: nextGenerations });
+                          }}
+                          disabled={!canEditSettings || !isEnabled}
+                        >
+                          {value}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <small className="setting-note">More generations coming soon</small>
+                </div>
+
+                <div className="setting-block">
+                  <span className="setting-title">Display mode</span>
                   <div className="toggle-group">
                     {DISPLAY_MODE_OPTIONS.map((value) => (
                       <button
@@ -841,20 +1090,20 @@ function App() {
             <section className="menu-tile cup">
               {!isInLobby ? (
                 <div className="action-stage">
-                  <h3>Salon</h3>
+                  <h3>Lobby</h3>
                   <div className="salon-actions">
-                    <button className="primary big-cta" onClick={createRoom}>Creer un salon</button>
-                    <button className="big-cta" onClick={startSoloLocal}>Jouer en solo local</button>
+                    <button className="primary big-cta" onClick={createRoom} disabled={!serverOnline}>Create lobby</button>
+                    <button className="big-cta" onClick={startSoloLocal}>Play local solo</button>
                   </div>
-                  <p className="join-label">Tu as deja un code ?</p>
+                  <p className="join-label">Already have a room code?</p>
                   <div className="join">
                     <input
                       value={joinRoomId}
                       onChange={(e) => setJoinRoomId(e.target.value.toUpperCase())}
-                      placeholder="Code room"
+                      placeholder="Room code"
                       maxLength={5}
                     />
-                    <button onClick={joinRoom}>Rejoindre</button>
+                      <button onClick={joinRoom}>Join</button>
                   </div>
                 </div>
               ) : (
@@ -864,8 +1113,10 @@ function App() {
                     <span>{room.players.length}/8</span>
                   </div>
                   <div className="lobby-summary">
-                    <span>{room.settings.rounds} manches</span>
-                    <span>{room.settings.roundDurationSec}s / manche</span>
+                    <span>{room.settings.rounds} rounds</span>
+                    <span>{room.settings.roundDurationSec}s / round</span>
+                    <span>{roomDisplayLabel}</span>
+                    <span>{roomGenerationsLabel}</span>
                     <span>{room.settings.language.toUpperCase()}</span>
                   </div>
                   <ul className="lobby-player-list">
@@ -874,29 +1125,37 @@ function App() {
                       .sort((a, b) => b.score - a.score)
                       .map((p) => (
                         <li key={p.id}>
-                          <span className="player-badge">{avatarTag(p.avatar)}</span>
+                          <span className="player-badge">
+                            <img
+                              className="avatar-image"
+                              src={getAvatarAsset(p.avatar).image}
+                              alt={getAvatarAsset(p.avatar).label}
+                              loading="lazy"
+                            />
+                          </span>
                           <strong>{p.nickname}</strong>
-                          <span>{p.isHost ? "Hote" : "Joueur"}</span>
+                          <span>{p.isHost ? "Host" : "Player"}</span>
                         </li>
                       ))}
                   </ul>
-                  <div className="cta-row">
+                  <div className={room.id !== "LOCAL" ? "cta-row with-share" : "cta-row"}>
+                    <button onClick={quitRoom}>Leave</button>
+                    {room.id !== "LOCAL" ? (
+                      <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>Copy room link</button>
+                    ) : null}
                     {isHost ? (
-                      <button className="primary big-cta" onClick={startGame}>Lancer la partie</button>
+                      <button className="primary big-cta" onClick={startGame}>Start game</button>
                     ) : (
-                      <button className="big-cta" disabled>Lancer la partie</button>
+                      <button className="big-cta" disabled>Start game</button>
                     )}
-                    <button onClick={quitRoom}>Quitter</button>
                   </div>
-                  {!isHost ? <p className="waiting-text">En attente de l'hote...</p> : null}
+                  {inviteCopied ? <p className="waiting-text">Invite copied</p> : null}
+                  {!isHost ? <p className="waiting-text">Waiting for host...</p> : null}
                 </div>
               )}
             </section>
           </div>
 
-          {serverOnline === false ? (
-            <p className="info">Serveur indisponible. Tu peux continuer en solo local.</p>
-          ) : null}
           {error ? <p className="error home-error">{error}</p> : null}
         </section>
       </main>
@@ -904,132 +1163,98 @@ function App() {
   }
 
   return (
-    <main className="page page-room">
+    <main
+      className={`page page-room ${room.state === "round" ? "round-active-screen" : ""} ${room.state === "roundResults" ? "results-screen" : ""}`.trim()}
+    >
       <header className="topbar card">
-        <div className="room-head">
-          <p className="phase-label">{phaseLabel}</p>
-          <h2>Room {room.id}</h2>
-          <p>Manche {room.roundIndex}/{room.totalRounds}</p>
-          <div
-            className="round-progress-track"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(roundProgress * 100)}
-          >
-            <div className="round-progress-fill" style={{ width: `${roundProgress * 100}%` }} />
+        <button className="quit-btn" onClick={quitRoom}>Leave</button>
+        {room.state !== "finalResults" ? (
+          <div className="top-salon">
+            <h3>Salon ({room.players.length}/8)</h3>
+            <ul className="top-salon-list">
+              {sortedPlayers.map((p, index) => (
+                <li key={p.id} className={`${!p.connected ? "disconnected" : ""} ${p.id === playerId ? "me" : ""}`.trim()}>
+                  <span className="rank">#{index + 1}</span>
+                  <span className="player-avatar">
+                    <img
+                      className="avatar-image"
+                      src={getAvatarAsset(p.avatar).image}
+                      alt={getAvatarAsset(p.avatar).label}
+                      loading="lazy"
+                    />
+                  </span>
+                  <strong>{p.nickname}</strong>
+                  <span className="player-score">{p.score} pts</span>
+                  {p.isHost ? <span className="host-chip">Host</span> : null}
+                </li>
+              ))}
+            </ul>
           </div>
-          <div className="room-meta-chips">
-            <span>{roomDisplayLabel}</span>
-            <span>{roomScoringLabel}</span>
-            <span>{room.settings.language.toUpperCase()}</span>
-            <span>{room.settings.roundDurationSec}s</span>
-            {isLocalRoom ? <span>SOLO</span> : null}
-          </div>
-        </div>
-        <div className="hud-actions">
-          {room.state === "round" ? (
-            <span className="submission-chip">{submittedAnswersCount}/{room.players.length} reponses verrouillees</span>
+        ) : <div className="top-salon spacer" />}
+        <div className="topbar-right">
+          {room.id !== "LOCAL" ? (
+            <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>Copy room link</button>
           ) : null}
-
-          {(room.state === "round" || room.state === "voting" || room.state === "roundResults") ? (
-            <div className="timer-meter" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timerProgress * 100)}>
-              <span>{timerLabel}</span>
-              <div className="timer-track">
-                <div className="timer-fill" style={{ width: `${timerProgress * 100}%` }} />
-              </div>
-            </div>
-          ) : (
-            <div className="timer-meter static"><span>{timerLabel}</span></div>
-          )}
-
-          {room.state === "roundResults" ? (
-            <button className="primary" onClick={nextRoundNow} disabled={!isHost}>
-              Suivant
-            </button>
-          ) : null}
-
-          <button className="quit-btn" onClick={quitRoom}>Quitter</button>
+          {inviteCopied ? <span className="copied-pill">Copied</span> : null}
+          <div className="round-counter">{room.roundIndex}/{room.totalRounds}</div>
         </div>
       </header>
 
       <section className="layout">
-        <aside className="card players">
-          <h3>Escouade ({room.players.length}/8)</h3>
-          <ul>
-            {room.players
-              .slice()
-              .sort((a, b) => b.score - a.score)
-              .map((p, index) => {
-                const statusLabel = !p.connected
-                  ? "Hors ligne"
-                  : (room.state === "round" && p.hasSubmitted ? "Reponse envoyee" : "En ligne");
-
-                return (
-                  <li key={p.id} className={`${!p.connected ? "disconnected" : ""} ${p.id === playerId ? "me" : ""}`.trim()}>
-                    <span className="rank">#{index + 1}</span>
-                    <span className="player-line">
-                      <strong>{p.nickname}</strong>
-                      <small>{statusLabel}</small>
-                    </span>
-                    <span className="player-score">{p.score} pts</span>
-                    <span className="player-avatar">{avatarTag(p.avatar)}</span>
-                    {p.isHost ? <em>Hote</em> : null}
-                  </li>
-                );
-              })}
-          </ul>
-        </aside>
-
         {room.state === "round" && (
-          <section className="card panel fade-in">
-            <h3>Pokemon mystere</h3>
-            <p className="panel-subtitle">
-              {room.settings.displayMode === "whosthat"
-                ? "Mode silhouette actif : identifie le Pokemon avant la fin du chrono."
-                : "Mode normal actif : memorise et valide ta reponse le plus vite possible."}
-            </p>
-            <PokemonCanvas
-              sprite={room.currentPokemon?.sprite}
-              hidden={room.settings.displayMode === "whosthat"}
-            />
-            <p className="panel-hint">
-              {me?.hasSubmitted
-                ? "Reponse envoyee. Attends la fin du chrono."
-                : "Entre ta meilleure proposition avant la fin du timer."}
-            </p>
-
-            <div className="answer-row">
-              <div className="answer-mask-input">
-                <span className="answer-mask-display" aria-hidden="true">{answerMaskDisplay}</span>
-                <input
-                  ref={answerInputRef}
-                  className="answer-mask-field"
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value.replace(/[^0-9A-Za-zÀ-ÿ]/g, "").slice(0, answerSlotsCount))}
-                  placeholder=""
-                  autoComplete="off"
-                  autoCapitalize="characters"
-                  spellCheck={false}
-                  maxLength={answerSlotsCount}
-                  disabled={me?.hasSubmitted}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") submitAnswer();
-                  }}
-                  aria-label={room.settings.language === "fr" ? "Nom du Pokemon" : "Pokemon name"}
+          <section className="panel panel-round fade-in">
+            <div className="round-focus-zone">
+              <h3>Who's that Pokemon?</h3>
+              <div className="pokemon-stage">
+                <PokemonCanvas
+                  sprite={room.currentPokemon?.sprite}
+                  hidden={room.settings.displayMode === "whosthat"}
                 />
               </div>
-              <button onClick={submitAnswer} disabled={me?.hasSubmitted || !answer.trim()}>
-                {me?.hasSubmitted ? "Verrouille" : "Valider"}
-              </button>
+              <p className="panel-hint">
+                Type your best guess before the timer ends.
+              </p>
+              <div className="answer-row">
+                <div className="answer-mask-input">
+                  <span className="answer-mask-display" aria-hidden="true">
+                    <span className="answer-mask-content">
+                      <span className="answer-mask-arrow">▶</span>
+                      {answerMaskTokens.map((token, index) => (
+                        <span key={`${token.char}-${index}`} className={token.isCurrent ? "mask-char current" : "mask-char"}>
+                          {token.char === " " ? "\u00A0" : token.char}
+                        </span>
+                      ))}
+                    </span>
+                  </span>
+                  <input
+                    ref={answerInputRef}
+                    className="answer-mask-field"
+                    value={answer}
+                    onChange={(e) => setAnswer(e.target.value.replace(/[^0-9A-Za-zÀ-ÿ]/g, "").slice(0, answerSlotsCount))}
+                    placeholder=""
+                    autoComplete="off"
+                    autoCapitalize="characters"
+                    spellCheck={false}
+                    maxLength={answerSlotsCount}
+                    disabled={me?.hasSubmitted}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitAnswer();
+                    }}
+                    aria-label="Pokemon name"
+                  />
+                </div>
+                <button onClick={submitAnswer} disabled={me?.hasSubmitted || !answer.trim()}>
+                  Submit
+                </button>
+              </div>
             </div>
           </section>
         )}
 
         {room.state === "voting" && (
           <section className="card panel fade-in">
-            <h3>Phase de vote</h3>
-            <p>Confirme les reponses de chaque joueur pour valider les points accordes.</p>
+            <h3>Voting phase</h3>
+            <p>Review each player answer to validate awarded points.</p>
             <div className="votes">
               {room.recentRoundResults.map((result) => {
                 const mine = result.playerId === playerId;
@@ -1037,15 +1262,15 @@ function App() {
                   <article key={result.playerId} className="vote-card">
                     <div className="vote-head">
                       <strong>{result.nickname}</strong>
-                      <span>{result.provisionalScore} pts potentiels</span>
+                      <span>{result.provisionalScore} potential pts</span>
                     </div>
-                    <p>{result.answer || "(aucune reponse)"}</p>
+                    <p>{result.answer || "(no answer)"}</p>
                     {mine ? (
-                      <em>Ta reponse</em>
+                      <em>Your answer</em>
                     ) : (
                       <div className="row">
-                        <button onClick={() => submitVote(result.playerId, true)}>Valider</button>
-                        <button onClick={() => submitVote(result.playerId, false)}>Refuser</button>
+                        <button onClick={() => submitVote(result.playerId, true)}>Approve</button>
+                        <button onClick={() => submitVote(result.playerId, false)}>Reject</button>
                       </div>
                     )}
                   </article>
@@ -1056,25 +1281,37 @@ function App() {
         )}
 
         {room.state === "roundResults" && (
-          <section className="card panel fade-in">
-            <h3>Debrief manche</h3>
-            <p>Reponse cible : {room.expectedName}</p>
+          <section className="card panel panel-results fade-in">
+            <h3>Results</h3>
+            <div key={`reveal-${room.roundIndex}`} className="result-pokemon-reveal">
+              <img src={room.currentPokemon?.sprite} alt={room.expectedName || "Pokemon"} loading="lazy" />
+              <p className="reveal-name">{room.expectedName}</p>
+            </div>
             <ul className="result-list">
               {room.recentRoundResults.map((result) => (
                 <li key={result.playerId}>
-                  <span>{result.nickname}: {result.answer || "(aucune reponse)"}</span>
-                  <span className="result-accuracy">{result.exact ? "Exact" : `${result.provisionalScore}%`}</span>
-                  <strong>+{result.awardedScore}</strong>
+                  <span className="result-main">{result.nickname}: {result.answer || "(no answer)"}</span>
+                  <span className="result-side">
+                    <span className="result-accuracy">{result.exact ? "Exact" : `${result.provisionalScore}%`}</span>
+                    <strong>+{result.awardedScore}</strong>
+                  </span>
                 </li>
               ))}
             </ul>
+            <div className="panel-actions">
+              {isHost ? (
+                <button className="primary" onClick={nextRoundNow}>Next</button>
+              ) : (
+                <p>Waiting for host...</p>
+              )}
+            </div>
           </section>
         )}
 
         {room.state === "finalResults" && (
           <section className="card panel fade-in">
-            <h3>Classement final</h3>
-            <p className="panel-subtitle">La session est terminee. Relance un lobby pour une nouvelle serie.</p>
+            <h3>Final ranking</h3>
+            <p className="panel-subtitle">Session complete. Start a new lobby for another run.</p>
             <ol className="leaderboard">
               {room.winners.map((p, index) => (
                 <li key={p.id}>
@@ -1086,16 +1323,26 @@ function App() {
             </ol>
 
             {isHost ? (
-              <button className="primary" onClick={returnToLobby}>Retour lobby</button>
+              <button className="primary" onClick={returnToLobby}>Back to lobby</button>
             ) : (
-              <p>En attente de l'hote...</p>
+              <p>Waiting for host...</p>
             )}
           </section>
         )}
       </section>
 
+      {(room.state === "round" || room.state === "voting" || room.state === "roundResults") ? (
+        <section className="card timer-banner timer-dock" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timerFillProgress * 100)}>
+          <div className="timer-banner-head">
+            <span>{timerLabel}</span>
+          </div>
+          <div className="timer-track">
+            <div className="timer-fill" style={{ width: `${timerFillProgress * 100}%` }} />
+          </div>
+        </section>
+      ) : null}
+
       {error ? <p className="error fixed-error">{error}</p> : null}
-      <footer className="card foot">Pokefinder Party - mode salon fun</footer>
     </main>
   );
 }
