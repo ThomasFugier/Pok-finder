@@ -54,6 +54,12 @@ const GENERATION_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 const ENABLED_GENERATIONS = [...GENERATION_OPTIONS];
 const RESULTS_DURATION_MS = 60000;
 const VOTING_DURATION_MS = 12000;
+const SCREEN_TRANSITION_PREP_MS = 24;
+const SCREEN_TRANSITION_ENTER_MS = 1000;
+const SCREEN_TRANSITION_HOLD_MS = 1000;
+const SCREEN_TRANSITION_EXIT_MS = 1000;
+const SCREEN_TRANSITION_SWITCH_MS = SCREEN_TRANSITION_ENTER_MS + Math.round(SCREEN_TRANSITION_HOLD_MS / 2);
+const FIRST_ROUND_REVEAL_DELAY_MS = SCREEN_TRANSITION_ENTER_MS + SCREEN_TRANSITION_HOLD_MS + SCREEN_TRANSITION_EXIT_MS;
 const DEFAULT_SETTINGS = {
   rounds: 10,
   language: "en",
@@ -348,10 +354,11 @@ function pickRandomPokemon(selectedGenerations = [1], usedPokemonIds = []) {
   return source[Math.floor(Math.random() * source.length)];
 }
 
-function startLocalRound(room) {
+function startLocalRound(room, { startDelayMs = 0 } = {}) {
   const players = clonePlayers(room.players).map((p) => ({ ...p, hasSubmitted: false, answer: "" }));
   const pickedPokemon = pickRandomPokemon(room.settings.generations, room.usedPokemonIds || []);
   const nextUsedPokemonIds = [...(room.usedPokemonIds || []), pickedPokemon.id];
+  const roundStartsAt = Date.now() + Math.max(0, startDelayMs);
   return {
     ...room,
     state: "round",
@@ -359,7 +366,8 @@ function startLocalRound(room) {
     players,
     currentPokemon: pickedPokemon,
     usedPokemonIds: nextUsedPokemonIds,
-    roundEndsAt: Date.now() + (room.settings.roundDurationSec * 1000),
+    roundStartsAt,
+    roundEndsAt: roundStartsAt + (room.settings.roundDurationSec * 1000),
     phaseEndsAt: null,
     isPaused: false,
     pausedRemainingMs: 0,
@@ -399,6 +407,7 @@ function finishLocalRound(room) {
     state: "roundResults",
     players,
     expectedName: expected,
+    roundStartsAt: null,
     roundEndsAt: null,
     phaseEndsAt: Date.now() + RESULTS_DURATION_MS,
     isPaused: false,
@@ -432,6 +441,7 @@ function createLocalRoom({ playerId, nickname, avatar, settings }) {
     state: "lobby",
     roundIndex: 0,
     totalRounds: initialSettings.rounds,
+    roundStartsAt: null,
     roundEndsAt: null,
     phaseEndsAt: null,
     isPaused: false,
@@ -586,12 +596,24 @@ function App() {
   const [serverOnline, setServerOnline] = useState(false);
   const [serverChecking, setServerChecking] = useState(true);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [floatingTooltip, setFloatingTooltip] = useState(null);
+  const [screenTransition, setScreenTransition] = useState({
+    visible: false,
+    phase: "idle",
+    toGame: true
+  });
+  const [renderedMainMenuView, setRenderedMainMenuView] = useState(true);
   const answerInputRef = useRef(null);
+  const previousMainMenuViewRef = useRef(null);
+  const transitionTimersRef = useRef([]);
+  const tooltipTargetRef = useRef(null);
 
   const me = useMemo(() => room?.players?.find((p) => p.id === playerId), [room, playerId]);
   const isHost = !!(me && room?.hostId === me.id);
   const isLocalRoom = room?.id === "LOCAL";
   const isInLobby = !!(room && room.state === "lobby");
+  const isMainMenuView = !roomId || !playerId || !room || room.state === "lobby";
+  const isRoundStarted = !!(room?.state === "round" && (!room?.roundStartsAt || now >= room.roundStartsAt));
 
   useEffect(() => {
     const identity = getLocalIdentity();
@@ -682,13 +704,13 @@ function App() {
   }, [room?.roundIndex, room?.state]);
 
   useEffect(() => {
-    if (room?.state !== "round" || me?.hasSubmitted) return;
+    if (room?.state !== "round" || me?.hasSubmitted || !isRoundStarted) return;
     const focusId = requestAnimationFrame(() => {
       answerInputRef.current?.focus();
       answerInputRef.current?.select();
     });
     return () => cancelAnimationFrame(focusId);
-  }, [room?.state, room?.roundIndex, me?.hasSubmitted]);
+  }, [room?.state, room?.roundIndex, me?.hasSubmitted, isRoundStarted]);
 
   useEffect(() => {
     if (room?.state !== "roundResults" || !isHost) return;
@@ -716,6 +738,136 @@ function App() {
   useEffect(() => {
     setLocalSetupSettings(formSettings);
   }, [formSettings]);
+
+  useEffect(() => {
+    const tooltipSelector = "[data-tooltip]";
+
+    const updateTooltipPosition = (target, textOverride) => {
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      const text = textOverride ?? target.getAttribute("data-tooltip") ?? "";
+      if (!text) return;
+      setFloatingTooltip({
+        text,
+        x: rect.left + (rect.width / 2),
+        y: rect.top - 10
+      });
+    };
+
+    const closeTooltip = () => {
+      tooltipTargetRef.current = null;
+      setFloatingTooltip(null);
+    };
+
+    const openFromTarget = (target) => {
+      if (!target) return;
+      tooltipTargetRef.current = target;
+      updateTooltipPosition(target);
+    };
+
+    const onMouseOver = (event) => {
+      const target = event.target?.closest?.(tooltipSelector);
+      if (!target) return;
+      openFromTarget(target);
+    };
+
+    const onMouseOut = (event) => {
+      if (!tooltipTargetRef.current) return;
+      const nextTarget = event.relatedTarget?.closest?.(tooltipSelector);
+      if (nextTarget === tooltipTargetRef.current) return;
+      if (nextTarget) {
+        openFromTarget(nextTarget);
+        return;
+      }
+      closeTooltip();
+    };
+
+    const onFocusIn = (event) => {
+      const target = event.target?.closest?.(tooltipSelector);
+      if (!target) return;
+      openFromTarget(target);
+    };
+
+    const onFocusOut = () => {
+      closeTooltip();
+    };
+
+    const onScrollOrResize = () => {
+      if (!tooltipTargetRef.current) return;
+      updateTooltipPosition(tooltipTargetRef.current);
+    };
+
+    const onPointerMove = () => {
+      if (!tooltipTargetRef.current) return;
+      updateTooltipPosition(tooltipTargetRef.current);
+    };
+
+    document.addEventListener("mouseover", onMouseOver);
+    document.addEventListener("mouseout", onMouseOut);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    window.addEventListener("pointermove", onPointerMove);
+
+    return () => {
+      document.removeEventListener("mouseover", onMouseOver);
+      document.removeEventListener("mouseout", onMouseOut);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+      window.removeEventListener("pointermove", onPointerMove);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previousMainMenuViewRef.current === null) {
+      previousMainMenuViewRef.current = isMainMenuView;
+      setRenderedMainMenuView(isMainMenuView);
+      return;
+    }
+
+    if (previousMainMenuViewRef.current === isMainMenuView) return;
+    previousMainMenuViewRef.current = isMainMenuView;
+
+    transitionTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+    transitionTimersRef.current = [];
+
+    const toGame = !isMainMenuView;
+    setScreenTransition({
+      visible: true,
+      phase: "pre",
+      toGame
+    });
+
+    const enterTimerId = setTimeout(() => {
+      setScreenTransition((current) => (current.visible ? { ...current, phase: "enter" } : current));
+    }, SCREEN_TRANSITION_PREP_MS);
+    const holdTimerId = setTimeout(() => {
+      setScreenTransition((current) => (current.visible ? { ...current, phase: "hold" } : current));
+    }, SCREEN_TRANSITION_PREP_MS + SCREEN_TRANSITION_ENTER_MS);
+    const switchTimerId = setTimeout(() => {
+      setRenderedMainMenuView(isMainMenuView);
+    }, SCREEN_TRANSITION_PREP_MS + SCREEN_TRANSITION_SWITCH_MS);
+    const exitTimerId = setTimeout(() => {
+      setScreenTransition((current) => (current.visible ? { ...current, phase: "exit" } : current));
+    }, SCREEN_TRANSITION_PREP_MS + SCREEN_TRANSITION_ENTER_MS + SCREEN_TRANSITION_HOLD_MS);
+    const doneTimerId = setTimeout(() => {
+      setScreenTransition({
+        visible: false,
+        phase: "idle",
+        toGame
+      });
+    }, SCREEN_TRANSITION_PREP_MS + SCREEN_TRANSITION_ENTER_MS + SCREEN_TRANSITION_HOLD_MS + SCREEN_TRANSITION_EXIT_MS);
+
+    transitionTimersRef.current = [enterTimerId, holdTimerId, switchTimerId, exitTimerId, doneTimerId];
+
+    return () => {
+      transitionTimersRef.current.forEach((timerId) => clearTimeout(timerId));
+      transitionTimersRef.current = [];
+    };
+  }, [isMainMenuView]);
 
   function applyMenuSettings(partial) {
     const nextSettings = sanitizeSettings({ ...formSettings, ...partial }, DEFAULT_SETTINGS);
@@ -857,7 +1009,7 @@ function App() {
         return;
       }
       const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, isReady: false, hasSubmitted: false, answer: "" }));
-      setRoom(startLocalRound({ ...room, players, roundIndex: 0, winners: [], usedPokemonIds: [] }));
+      setRoom(startLocalRound({ ...room, players, roundIndex: 0, winners: [], usedPokemonIds: [] }, { startDelayMs: FIRST_ROUND_REVEAL_DELAY_MS }));
       return;
     }
 
@@ -923,6 +1075,7 @@ function App() {
 
   async function submitAnswer() {
     if (!room) return;
+    if (room.state === "round" && room.roundStartsAt && now < room.roundStartsAt) return;
     const roundTemplate = buildAnswerMaskTemplate(getRoundTargetName(room));
     const preparedAnswer = hydrateAnswerFromTemplate(roundTemplate, answer);
     if (!preparedAnswer) return;
@@ -1011,6 +1164,7 @@ function App() {
         roundIndex: 0,
         totalRounds: room.settings.rounds,
         currentPokemon: null,
+        roundStartsAt: null,
         roundEndsAt: null,
         phaseEndsAt: null,
         isPaused: false,
@@ -1048,16 +1202,21 @@ function App() {
   }
 
   const roundMs = room?.state === "round" ? timeLeftMs(room?.roundEndsAt, now) : 0;
+  const displayedRoundMs = room?.state === "round"
+    ? (isRoundStarted ? roundMs : ((room?.settings?.roundDurationSec || 0) * 1000))
+    : 0;
   const phaseMs = room?.state !== "round" ? timeLeftMs(room?.phaseEndsAt, now) : 0;
 
   const timerTotalMs = room?.state === "round"
     ? (room.settings.roundDurationSec * 1000)
     : (room?.state === "voting" ? VOTING_DURATION_MS : RESULTS_DURATION_MS);
-  const liveRemainingMs = room?.state === "round" ? roundMs : phaseMs;
+  const liveRemainingMs = room?.state === "round" ? displayedRoundMs : phaseMs;
   const timerRemainingMs = room?.isPaused ? Math.max(0, room?.pausedRemainingMs || 0) : liveRemainingMs;
   const timerProgress = Math.max(0, Math.min(1, timerRemainingMs / Math.max(1, timerTotalMs)));
   const timerFillProgress = 1 - timerProgress;
-  const timerLabel = room?.isPaused ? "PAUSED" : `${Math.ceil(timerRemainingMs / 1000)}`;
+  const timerLabel = room?.isPaused
+    ? "PAUSED"
+    : (!isRoundStarted && room?.state === "round" ? "READY" : `${Math.ceil(timerRemainingMs / 1000)}`);
   const canEditSettings = !isInLobby || isHost;
   const roomDisplayLabel = room
     ? (DISPLAY_MODE_LABELS[room.settings.displayMode] || DISPLAY_MODE_LABELS.normal)
@@ -1090,7 +1249,52 @@ function App() {
     return { backFlow, frontFlow };
   }, [room?.state, room?.id, room?.roundIndex]);
 
-  if (!roomId || !playerId || !room || room.state === "lobby") {
+  const transitionOverlay = screenTransition.visible ? (
+    <div
+      className={`screen-transition-overlay ${screenTransition.phase} ${screenTransition.toGame ? "to-game" : "to-menu"}`.trim()}
+      aria-hidden="true"
+    >
+      <div className="screen-transition-card">
+        <p className="screen-transition-kicker">Poke Party Quiz</p>
+        <h2>{screenTransition.toGame ? "Get Ready!" : "Back to Lobby"}</h2>
+        <p>{screenTransition.toGame ? "The next round is loading..." : "Returning to the main menu..."}</p>
+      </div>
+    </div>
+  ) : null;
+
+  const floatingTooltipNode = floatingTooltip ? (
+    <div
+      className="global-tooltip"
+      style={{
+        left: `${floatingTooltip.x}px`,
+        top: `${floatingTooltip.y}px`
+      }}
+      role="tooltip"
+      aria-hidden="true"
+    >
+      {floatingTooltip.text}
+    </div>
+  ) : null;
+
+  if (!renderedMainMenuView && (!roomId || !playerId || !room)) {
+    return (
+      <main className="page page-home">
+        {transitionOverlay}
+        {floatingTooltipNode}
+      </main>
+    );
+  }
+
+  if (renderedMainMenuView && screenTransition.visible && screenTransition.toGame) {
+    return (
+      <main className="page page-home">
+        {transitionOverlay}
+        {floatingTooltipNode}
+      </main>
+    );
+  }
+
+  if (renderedMainMenuView) {
     return (
       <main className="page page-home">
         <section className="party-shell ultra-menu">
@@ -1359,6 +1563,8 @@ function App() {
 
           {error ? <p className="error home-error">{error}</p> : null}
         </section>
+        {transitionOverlay}
+        {floatingTooltipNode}
       </main>
     );
   }
@@ -1423,12 +1629,12 @@ function App() {
               <h3>Who's that Pokemon?</h3>
               <div className="pokemon-stage">
                 <PokemonCanvas
-                  sprite={room.currentPokemon?.sprite}
+                  sprite={isRoundStarted ? room.currentPokemon?.sprite : null}
                   hidden={room.settings.displayMode === "whosthat"}
                 />
               </div>
               <p className="panel-hint">
-                Type your best guess before the timer ends.
+                {isRoundStarted ? "Type your best guess before the timer ends." : "Get ready... Pokemon is about to appear."}
               </p>
               <div className="answer-row">
                 <div className="answer-mask-input">
@@ -1452,14 +1658,14 @@ function App() {
                     autoCapitalize="characters"
                     spellCheck={false}
                     maxLength={answerSlotsCount}
-                    disabled={me?.hasSubmitted}
+                    disabled={me?.hasSubmitted || !isRoundStarted}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") submitAnswer();
                     }}
                     aria-label="Pokemon name"
                   />
                 </div>
-                <button onClick={submitAnswer} disabled={me?.hasSubmitted || !answer.trim()}>
+                <button onClick={submitAnswer} disabled={me?.hasSubmitted || !answer.trim() || !isRoundStarted}>
                   Submit
                 </button>
               </div>
@@ -1593,6 +1799,8 @@ function App() {
       ) : null}
 
       {error ? <p className="error fixed-error">{error}</p> : null}
+      {transitionOverlay}
+      {floatingTooltipNode}
     </main>
   );
 }

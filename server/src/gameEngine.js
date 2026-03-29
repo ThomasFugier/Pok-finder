@@ -18,6 +18,8 @@ function now() {
   return Date.now();
 }
 
+const FIRST_ROUND_REVEAL_DELAY_MS = 3000;
+
 function getPokemonGeneration(pokemonId) {
   if (pokemonId <= 151) return 1;
   if (pokemonId <= 251) return 2;
@@ -126,6 +128,7 @@ export class GameEngine {
       answers: {},
       votes: {},
       roundEndsAt: null,
+      roundStartsAt: null,
       phaseEndsAt: null,
       roundTimer: null,
       phaseTimer: null,
@@ -369,7 +372,7 @@ export class GameEngine {
       p.hasSubmitted = false;
       p.answer = "";
     });
-    this.startRound(room);
+    this.startRound(room, { startDelayMs: FIRST_ROUND_REVEAL_DELAY_MS });
     return { room };
   }
 
@@ -399,6 +402,7 @@ export class GameEngine {
       room.isPaused = true;
       room.pausedRemainingMs = remainingMs;
       room.roundEndsAt = room.state === "round" ? null : room.roundEndsAt;
+      room.roundStartsAt = room.state === "round" ? null : room.roundStartsAt;
       room.phaseEndsAt = room.state !== "round" ? null : room.phaseEndsAt;
 
       clearTimeout(room.roundTimer);
@@ -415,7 +419,10 @@ export class GameEngine {
     room.pausedRemainingMs = 0;
 
     if (room.state === "round") {
+      const roundDurationMs = room.settings.roundDurationSec * 1000;
+      const preStartMs = Math.max(0, remainingMs - roundDurationMs);
       room.roundEndsAt = now() + remainingMs;
+      room.roundStartsAt = now() + preStartMs;
       clearTimeout(room.roundTimer);
       room.roundTimer = setTimeout(() => {
         this.finishRound(room.id);
@@ -439,7 +446,7 @@ export class GameEngine {
     return { ok: true, paused: false };
   }
 
-  startRound(room) {
+  startRound(room, { startDelayMs = 0 } = {}) {
     // Each round picks a random Pokemon from the generations enabled in settings.
     room.roundIndex += 1;
     room.state = "round";
@@ -460,13 +467,15 @@ export class GameEngine {
       p.answer = "";
     });
 
+    const delayMs = Math.max(0, startDelayMs);
     const durationMs = room.settings.roundDurationSec * 1000;
-    room.roundEndsAt = now() + durationMs;
+    room.roundStartsAt = now() + delayMs;
+    room.roundEndsAt = room.roundStartsAt + durationMs;
     this.setTicker(room);
     clearTimeout(room.roundTimer);
     room.roundTimer = setTimeout(() => {
       this.finishRound(room.id);
-    }, durationMs);
+    }, delayMs + durationMs);
 
     this.broadcastRoom(room);
   }
@@ -475,6 +484,7 @@ export class GameEngine {
     const room = this.rooms.get(roomId);
     if (!room) return { error: "Room not found" };
     if (room.state !== "round") return { error: "Round is not active" };
+    if (room.roundStartsAt && now() < room.roundStartsAt) return { error: "Round has not started yet" };
 
     const player = room.players.find((p) => p.id === playerId);
     if (!player) return { error: "Player not found" };
@@ -528,6 +538,7 @@ export class GameEngine {
     room.recentRoundResults = results;
     room.isPaused = false;
     room.pausedRemainingMs = 0;
+    room.roundStartsAt = null;
 
     if (room.settings.scoringMode === "voting") {
       // Voting mode pauses score awarding until players validate answers.
@@ -656,6 +667,7 @@ export class GameEngine {
     room.answers = {};
     room.votes = {};
     room.recentRoundResults = [];
+    room.roundStartsAt = null;
     room.phaseEndsAt = null;
     room.roundEndsAt = null;
     room.players.forEach((p) => {
@@ -691,6 +703,7 @@ export class GameEngine {
   }
 
   buildPublicState(room, viewerPlayerId = null) {
+    const hasRoundStarted = room.state !== "round" || !room.roundStartsAt || now() >= room.roundStartsAt;
     const expected = room.currentPokemon
       ? (room.settings.language === "fr" ? room.currentPokemon.fr : room.currentPokemon.en)
       : null;
@@ -711,10 +724,11 @@ export class GameEngine {
       pausedRemainingMs: room.isPaused ? room.pausedRemainingMs : 0,
       roundIndex: room.roundIndex,
       totalRounds: room.totalRounds,
+      roundStartsAt: room.roundStartsAt,
       roundEndsAt: room.roundEndsAt,
       phaseEndsAt: room.phaseEndsAt,
       players,
-      currentPokemon: room.currentPokemon
+      currentPokemon: room.currentPokemon && hasRoundStarted
         ? {
             id: room.currentPokemon.id,
             sprite: room.currentPokemon.sprite,
