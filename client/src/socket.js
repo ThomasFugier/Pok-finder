@@ -1,6 +1,16 @@
 import { io } from "socket.io-client";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
+const FALLBACK_SERVER_URL = "https://pok-finder.onrender.com";
+
+function resolveServerUrl() {
+  const raw = (import.meta.env.VITE_SERVER_URL || "").trim();
+  if (!raw || raw.includes("TON-BACKEND")) {
+    return FALLBACK_SERVER_URL;
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+const SERVER_URL = resolveServerUrl();
 
 export const socket = io(SERVER_URL, {
   autoConnect: false,
