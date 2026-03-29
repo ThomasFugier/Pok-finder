@@ -95,6 +95,18 @@ io.on("connection", (socket) => {
     ack?.({ ok: true });
   });
 
+  socket.on("room:setReady", (payload, ack) => {
+    const roomId = (payload?.roomId || "").toUpperCase();
+    const playerId = payload?.playerId;
+    const isReady = !!payload?.isReady;
+    const result = engine.setReadyState(roomId, playerId, isReady);
+    if (result?.error) {
+      ack?.({ ok: false, error: result.error });
+      return;
+    }
+    ack?.({ ok: true });
+  });
+
   socket.on("game:start", (payload, ack) => {
     const roomId = (payload?.roomId || "").toUpperCase();
     const playerId = payload?.playerId;

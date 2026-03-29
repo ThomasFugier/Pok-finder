@@ -12,7 +12,7 @@ import {
   VOTING_DURATION_MS
 } from "./config.js";
 import { createPlayerId, createRoomId, normalizeAnswer, similarityScore } from "./utils.js";
-import pokemonData from "./data/pokemon151.json" with { type: "json" };
+import pokemonData from "./data/pokemon_all.json" with { type: "json" };
 
 function now() {
   return Date.now();
@@ -38,7 +38,8 @@ function publicPlayer(player) {
     score: player.score,
     connected: player.connected,
     isHost: player.isHost,
-    hasSubmitted: player.hasSubmitted
+    hasSubmitted: player.hasSubmitted,
+    isReady: !!player.isReady
   };
 }
 
@@ -107,6 +108,7 @@ export class GameEngine {
           score: 0,
           connected: true,
           isHost: true,
+          isReady: false,
           hasSubmitted: false,
           answer: ""
         }
@@ -160,6 +162,7 @@ export class GameEngine {
       score: 0,
       connected: true,
       isHost: false,
+      isReady: false,
       hasSubmitted: false,
       answer: ""
     });
@@ -309,8 +312,24 @@ export class GameEngine {
 
     room.settings = sanitizeSettings(nextSettings, room.settings);
     room.totalRounds = room.settings.rounds;
+    room.players.forEach((p) => {
+      p.isReady = false;
+    });
     this.broadcastRoom(room);
     return { room };
+  }
+
+  setReadyState(roomId, playerId, isReady) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: "Room not found" };
+    if (room.state !== "lobby") return { error: "Can only set ready in lobby" };
+
+    const player = room.players.find((p) => p.id === playerId);
+    if (!player) return { error: "Player not found" };
+
+    player.isReady = !!isReady;
+    this.broadcastRoom(room);
+    return { ok: true };
   }
 
   startGame(roomId, playerId) {
@@ -318,11 +337,16 @@ export class GameEngine {
     if (!room) return { error: "Room not found" };
     if (room.hostId !== playerId) return { error: "Only host can start" };
     if (room.players.length < 1) return { error: "Need at least one player" };
+    const connectedPlayers = room.players.filter((p) => p.connected);
+    if (!connectedPlayers.every((p) => p.isReady)) {
+      return { error: "All players must be ready" };
+    }
 
     room.state = "round";
     room.roundIndex = 0;
     room.players.forEach((p) => {
       p.score = 0;
+      p.isReady = false;
       p.hasSubmitted = false;
       p.answer = "";
     });
@@ -547,6 +571,7 @@ export class GameEngine {
     room.phaseEndsAt = null;
     room.roundEndsAt = null;
     room.players.forEach((p) => {
+      p.isReady = false;
       p.hasSubmitted = false;
       p.answer = "";
       p.score = 0;

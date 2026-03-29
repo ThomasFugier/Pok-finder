@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { checkServerHealth, emitAck, socket } from "./socket";
 import { useGameStore } from "./store";
-import pokemonData from "./data/pokemon151.json";
+import pokemonData from "./data/pokemon_all.json";
 
 const AVATAR_ASSETS = {
   red: {
@@ -51,7 +51,7 @@ const LANGUAGE_OPTIONS = ["en", "fr"];
 const DISPLAY_MODE_OPTIONS = ["normal", "whosthat"];
 const SCORING_MODE_OPTIONS = ["exact", "voting", "approx"];
 const GENERATION_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-const ENABLED_GENERATIONS = [1];
+const ENABLED_GENERATIONS = [...GENERATION_OPTIONS];
 const RESULTS_DURATION_MS = 60000;
 const VOTING_DURATION_MS = 12000;
 const DEFAULT_SETTINGS = {
@@ -373,6 +373,7 @@ function createLocalRoom({ playerId, nickname, avatar, settings }) {
         score: 0,
         connected: true,
         isHost: true,
+        isReady: false,
         hasSubmitted: false,
         answer: ""
       }
@@ -757,9 +758,14 @@ function App() {
 
   async function startGame() {
     if (!room) return;
+    const connectedPlayers = room.players.filter((p) => p.connected);
+    if (!connectedPlayers.every((p) => p.isReady)) {
+      setError("All players must be ready");
+      return;
+    }
 
     if (isLocalRoom) {
-      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, hasSubmitted: false, answer: "" }));
+      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, isReady: false, hasSubmitted: false, answer: "" }));
       setRoom(startLocalRound({ ...room, players, roundIndex: 0, winners: [] }));
       return;
     }
@@ -832,11 +838,32 @@ function App() {
     if (!res.ok) setError(res.error || "Failed to vote");
   }
 
+  async function toggleReadyState() {
+    if (!room || !playerId || room.state !== "lobby") return;
+    const mePlayer = room.players.find((p) => p.id === playerId);
+    const nextReady = !mePlayer?.isReady;
+
+    if (isLocalRoom) {
+      const players = clonePlayers(room.players).map((p) => (
+        p.id === playerId ? { ...p, isReady: nextReady } : p
+      ));
+      setRoom({ ...room, players });
+      return;
+    }
+
+    const res = await emitAck("room:setReady", {
+      roomId: room.id,
+      playerId,
+      isReady: nextReady
+    });
+    if (!res.ok) setError(res.error || "Failed to update ready state");
+  }
+
   async function returnToLobby() {
     if (!room) return;
 
     if (isLocalRoom) {
-      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, hasSubmitted: false, answer: "" }));
+      const players = clonePlayers(room.players).map((p) => ({ ...p, score: 0, isReady: false, hasSubmitted: false, answer: "" }));
       setRoom({
         ...room,
         state: "lobby",
@@ -907,6 +934,9 @@ function App() {
   const sortedPlayers = room?.players
     ? room.players.slice().sort((a, b) => b.score - a.score)
     : [];
+  const readyPlayersCount = room ? room.players.filter((p) => p.isReady && p.connected).length : 0;
+  const connectedPlayersCount = room ? room.players.filter((p) => p.connected).length : 0;
+  const allConnectedReady = room ? connectedPlayersCount > 0 && readyPlayersCount === connectedPlayersCount : false;
 
   if (!roomId || !playerId || !room || room.state === "lobby") {
     return (
@@ -1026,7 +1056,6 @@ function App() {
                       );
                     })}
                   </div>
-                  <small className="setting-note">More generations coming soon</small>
                 </div>
 
                 <div className="setting-block">
@@ -1134,21 +1163,25 @@ function App() {
                             />
                           </span>
                           <strong>{p.nickname}</strong>
-                          <span>{p.isHost ? "Host" : "Player"}</span>
+                          <span>{p.isReady ? "Ready" : "Not ready"}</span>
                         </li>
                       ))}
                   </ul>
-                  <div className={room.id !== "LOCAL" ? "cta-row with-share" : "cta-row"}>
+                  <div className="cta-row lobby-actions">
+                    <button className={me?.isReady ? "primary" : ""} onClick={toggleReadyState}>
+                      {me?.isReady ? "Unready" : "Ready"}
+                    </button>
                     <button onClick={quitRoom}>Leave</button>
                     {room.id !== "LOCAL" ? (
                       <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>Copy room link</button>
                     ) : null}
                     {isHost ? (
-                      <button className="primary big-cta" onClick={startGame}>Start game</button>
+                      <button className="primary big-cta" onClick={startGame} disabled={!allConnectedReady}>Start game</button>
                     ) : (
                       <button className="big-cta" disabled>Start game</button>
                     )}
                   </div>
+                  <p className="waiting-text">Ready players: {readyPlayersCount}/{connectedPlayersCount}</p>
                   {inviteCopied ? <p className="waiting-text">Invite copied</p> : null}
                   {!isHost ? <p className="waiting-text">Waiting for host...</p> : null}
                 </div>

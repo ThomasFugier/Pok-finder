@@ -8,7 +8,7 @@ export const LANGUAGE_OPTIONS = ["en", "fr"];
 export const DISPLAY_MODE_OPTIONS = ["normal", "whosthat"];
 export const SCORING_MODE_OPTIONS = ["exact", "voting", "approx"];
 export const GENERATION_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-export const ENABLED_GENERATIONS = [1];
+export const ENABLED_GENERATIONS = [...GENERATION_OPTIONS];
 
 export const DEFAULT_SETTINGS = {
   rounds: 10,
