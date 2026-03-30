@@ -80,6 +80,10 @@ function setLocalSetupSettings(value) {
   setStoredSetupSettings(value);
 }
 
+function sanitizeRoomCodeInput(value = "") {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+}
+
 function timeLeftMs(ts, currentNow) {
   return timeLeftMsShared(ts, currentNow);
 }
@@ -157,7 +161,7 @@ function App() {
   const [joinRoomId, setJoinRoomId] = useState(() => {
     try {
       const value = new URLSearchParams(window.location.search).get("room") || "";
-      return value.toUpperCase().slice(0, 5);
+      return sanitizeRoomCodeInput(value);
     } catch {
       return "";
     }
@@ -166,7 +170,17 @@ function App() {
   const [serverOnline, setServerOnline] = useState(false);
   const [serverChecking, setServerChecking] = useState(true);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => {
+    try {
+      return window.matchMedia("(max-width: 760px)").matches;
+    } catch {
+      return false;
+    }
+  });
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [mobileMenuStep, setMobileMenuStep] = useState(() => (joinRoomId ? "lobby" : "profile"));
   const answerInputRef = useRef(null);
+  const joinInputRef = useRef(null);
 
   const me = useMemo(() => room?.players?.find((p) => p.id === playerId), [room, playerId]);
   const isHost = !!(me && room?.hostId === me.id);
@@ -222,6 +236,56 @@ function App() {
     approx: copy.scoringApproxTooltip,
     voting: copy.scoringVotingTooltip
   }), [copy]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 760px)");
+    const syncViewport = (event) => {
+      setIsMobileViewport(event.matches);
+    };
+
+    setIsMobileViewport(mediaQuery.matches);
+    mediaQuery.addEventListener("change", syncViewport);
+
+    return () => mediaQuery.removeEventListener("change", syncViewport);
+  }, []);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+
+    const syncKeyboard = () => {
+      const keyboardHeight = window.innerHeight - viewport.height;
+      setIsKeyboardOpen(keyboardHeight > 140);
+    };
+
+    syncKeyboard();
+    viewport.addEventListener("resize", syncKeyboard);
+    viewport.addEventListener("scroll", syncKeyboard);
+
+    return () => {
+      viewport.removeEventListener("resize", syncKeyboard);
+      viewport.removeEventListener("scroll", syncKeyboard);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    if (isInLobby) {
+      setMobileMenuStep("lobby");
+    }
+  }, [isMobileViewport, isInLobby]);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    if (isInLobby) return;
+    if (mobileMenuStep !== "lobby") return;
+
+    const focusId = requestAnimationFrame(() => {
+      joinInputRef.current?.focus();
+    });
+
+    return () => cancelAnimationFrame(focusId);
+  }, [isInLobby, isMobileViewport, mobileMenuStep]);
 
   useEffect(() => {
     const identity = getLocalIdentity();
@@ -457,7 +521,11 @@ function App() {
 
   async function joinRoom() {
     const cleanName = (formName || copy.playerLabel).slice(0, 20);
-    const code = joinRoomId.trim().toUpperCase();
+    const code = sanitizeRoomCodeInput(joinRoomId);
+    if (code.length !== 5) {
+      setError(copy.joinCodeInvalid);
+      return;
+    }
     const previous = getLocalIdentity();
     const res = await emitAck("room:join", {
       roomId: code,
@@ -681,11 +749,33 @@ function App() {
   const sortedPlayers = room?.players
     ? room.players.slice().sort((a, b) => b.score - a.score)
     : [];
+  const joinCodeValue = sanitizeRoomCodeInput(joinRoomId);
+  const isJoinCodeComplete = joinCodeValue.length === 5;
+  const canJoinRoom = serverOnline && isJoinCodeComplete;
+  const createActionHint = !serverOnline ? copy.actionServerOffline : "";
+  const joinActionHint = !serverOnline
+    ? copy.actionServerOffline
+    : (!isJoinCodeComplete ? copy.joinCodeInvalid : "");
   const readyPlayersCount = room ? room.players.filter((p) => p.isReady && p.connected).length : 0;
   const connectedPlayersCount = room ? room.players.filter((p) => p.connected).length : 0;
   const allConnectedReady = room ? connectedPlayersCount > 0 && readyPlayersCount === connectedPlayersCount : false;
+  const startDisabledReason = !isHost
+    ? copy.startHostOnly
+    : (!isLocalRoom && !allConnectedReady
+      ? formatCopy(copy.startNeedsReady, { ready: readyPlayersCount, connected: connectedPlayersCount })
+      : "");
+  const submitDisabledReason = me?.hasSubmitted
+    ? copy.submitAlreadySent
+    : (!isRoundStarted
+      ? copy.submitRoundLocked
+      : (!answer.trim() ? copy.submitNeedAnswer : ""));
+  const isSubmitDisabled = !!(me?.hasSubmitted || !answer.trim() || !isRoundStarted);
   const canPauseGame = !!(room && isHost && ["round", "voting", "roundResults"].includes(room.state));
-  const isTimerVisible = !!room && (room.state === "round" || room.state === "voting" || room.state === "roundResults");
+  const shouldHideTimerForKeyboard = !!(isMobileViewport && isKeyboardOpen && room?.state === "round");
+  const isTimerVisible = !!room
+    && (room.state === "round" || room.state === "voting" || room.state === "roundResults")
+    && !shouldHideTimerForKeyboard;
+  const showMobileSubmitDock = !!(isMobileViewport && room?.state === "round");
   const timerActionLabel = room?.state === "roundResults"
     ? copy.timerNext
     : (room?.isPaused ? copy.timerResume : copy.timerPause);
@@ -708,7 +798,7 @@ function App() {
     </div>
   ) : null;
 
-  const floatingTooltipNode = floatingTooltip ? (
+  const floatingTooltipNode = !isMobileViewport && floatingTooltip ? (
     <div
       className="global-tooltip"
       style={{
@@ -749,17 +839,43 @@ function App() {
               <h1>{copy.gameTitle}</h1>
             </div>
             <div className="menu-status">
-              <span className={serverOnline ? "status-pill online" : "status-pill offline"}>
+              <span className={serverOnline ? "status-pill online" : "status-pill offline"} role="status" aria-live="polite">
                 <span className={serverOnline ? "network-icon online" : "network-icon offline"} aria-hidden="true" />
                 <span>{serverOnline ? copy.serverOnline : copy.serverOffline}</span>
                 {serverChecking ? <span className="status-spinner" aria-hidden="true" /> : null}
               </span>
-              {isInLobby ? <p className="room-code">{formatCopy(copy.activeCode, { roomId: room.id })}</p> : null}
+              {isInLobby ? <p className="room-code" role="status" aria-live="polite">{formatCopy(copy.activeCode, { roomId: room.id })}</p> : null}
             </div>
           </header>
 
-          <div className="menu-tile-grid">
-            <section className="menu-tile playopedia">
+          {isMobileViewport ? (
+            <nav className="mobile-menu-steps" aria-label={copy.mobileSectionsLabel}>
+              <button
+                type="button"
+                className={mobileMenuStep === "profile" ? "mobile-step-btn active" : "mobile-step-btn"}
+                onClick={() => setMobileMenuStep("profile")}
+              >
+                {copy.mobileSectionProfile}
+              </button>
+              <button
+                type="button"
+                className={mobileMenuStep === "settings" ? "mobile-step-btn active" : "mobile-step-btn"}
+                onClick={() => setMobileMenuStep("settings")}
+              >
+                {copy.mobileSectionSettings}
+              </button>
+              <button
+                type="button"
+                className={mobileMenuStep === "lobby" ? "mobile-step-btn active" : "mobile-step-btn"}
+                onClick={() => setMobileMenuStep("lobby")}
+              >
+                {copy.mobileSectionLobby}
+              </button>
+            </nav>
+          ) : null}
+
+          <div className={`menu-tile-grid ${isMobileViewport ? "mobile-stepped" : ""}`.trim()}>
+            <section className={`menu-tile playopedia ${!isMobileViewport || mobileMenuStep === "profile" ? "mobile-active" : ""}`.trim()}>
               <h3>{copy.trainerProfile}</h3>
               <div className="profile-identity">
                 <div className="profile-avatar-picker">
@@ -790,8 +906,9 @@ function App() {
               </div>
             </section>
 
-            <section className="menu-tile crew">
+            <section className={`menu-tile crew ${!isMobileViewport || mobileMenuStep === "settings" ? "mobile-active" : ""}`.trim()}>
               <h3>{copy.gameSettings}</h3>
+              {isMobileViewport ? <p className="mobile-settings-hint">{copy.mobileSettingsHint}</p> : null}
               <div className="settings">
                 <div className="setting-block range-setting">
                   <div className="setting-head">
@@ -934,7 +1051,7 @@ function App() {
               </div>
             </section>
 
-            <section className="menu-tile cup">
+            <section className={`menu-tile cup ${!isMobileViewport || mobileMenuStep === "lobby" ? "mobile-active" : ""}`.trim()}>
               {!isInLobby ? (
                 <div className="action-stage">
                   <h3>{copy.lobbyTitle}</h3>
@@ -942,16 +1059,30 @@ function App() {
                     <button className="primary big-cta" onClick={createRoom} disabled={!serverOnline}>{copy.createLobby}</button>
                     <button className="big-cta" onClick={startSoloLocal}>{copy.playLocalSolo}</button>
                   </div>
+                  {createActionHint ? <p className="action-hint" role="status" aria-live="polite">{createActionHint}</p> : null}
                   <p className="join-label">{copy.alreadyHaveRoomCode}</p>
-                  <div className="join">
+                  <div className="join thumb-dock">
                     <input
-                      value={joinRoomId}
-                      onChange={(e) => setJoinRoomId(e.target.value.toUpperCase())}
+                      ref={joinInputRef}
+                      value={joinCodeValue}
+                      onChange={(e) => setJoinRoomId(sanitizeRoomCodeInput(e.target.value))}
                       placeholder={copy.roomCodePlaceholder}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      autoCapitalize="characters"
+                      inputMode="text"
                       maxLength={5}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        if (!canJoinRoom) return;
+                        event.preventDefault();
+                        joinRoom();
+                      }}
                     />
-                      <button onClick={joinRoom}>{copy.join}</button>
+                    <button onClick={joinRoom} disabled={!canJoinRoom}>{copy.join}</button>
                   </div>
+                  {joinActionHint ? <p className="action-hint" role="status" aria-live="polite">{joinActionHint}</p> : null}
                 </div>
               ) : (
                 <div className="lobby-stage">
@@ -987,7 +1118,7 @@ function App() {
                         </li>
                       ))}
                   </ul>
-                  <div className="cta-row lobby-actions">
+                  <div className="cta-row lobby-actions thumb-dock">
                     {!isLocalRoom ? (
                       <button className={me?.isReady ? "primary" : ""} onClick={toggleReadyState}>
                         {me?.isReady ? copy.unready : copy.ready}
@@ -998,20 +1129,21 @@ function App() {
                       <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>{copy.copyRoomLink}</button>
                     ) : null}
                     {isHost ? (
-                      <button className="primary big-cta" onClick={startGame} disabled={!isLocalRoom && !allConnectedReady}>{copy.startGame}</button>
+                      <button className="primary big-cta" onClick={startGame} disabled={!!startDisabledReason}>{copy.startGame}</button>
                     ) : (
                       <button className="big-cta" disabled>{copy.startGame}</button>
                     )}
                   </div>
+                  {startDisabledReason ? <p className="action-hint" role="status" aria-live="polite">{startDisabledReason}</p> : null}
                   {!isLocalRoom ? <p className="waiting-text">{formatCopy(copy.readyPlayers, { ready: readyPlayersCount, connected: connectedPlayersCount })}</p> : null}
-                  {inviteCopied ? <p className="waiting-text">{copy.inviteCopied}</p> : null}
+                  {inviteCopied ? <p className="waiting-text" role="status" aria-live="polite">{copy.inviteCopied}</p> : null}
                   {!isHost ? <p className="waiting-text">{copy.waitingForHost}</p> : null}
                 </div>
               )}
             </section>
           </div>
 
-          {error ? <p className="error home-error">{error}</p> : null}
+          {error ? <p className="error home-error" role="alert" aria-live="assertive">{error}</p> : null}
         </section>
         {transitionOverlay}
         {floatingTooltipNode}
@@ -1067,7 +1199,7 @@ function App() {
           {room.id !== "LOCAL" ? (
             <button className="share-btn" onClick={() => copyRoomInvite(room.id)}>{copy.copyRoomLink}</button>
           ) : null}
-          {inviteCopied ? <span className="copied-pill">{copy.copied}</span> : null}
+          {inviteCopied ? <span className="copied-pill" role="status" aria-live="polite">{copy.copied}</span> : null}
           <div className="round-counter">{room.roundIndex}/{room.totalRounds}</div>
         </div>
       </header>
@@ -1115,7 +1247,7 @@ function App() {
                     aria-label={copy.pokemonNameAria}
                   />
                 </div>
-                <button onClick={submitAnswer} disabled={me?.hasSubmitted || !answer.trim() || !isRoundStarted}>
+                <button className="answer-submit-inline" onClick={submitAnswer} disabled={isSubmitDisabled}>
                   {copy.submit}
                 </button>
               </div>
@@ -1223,6 +1355,15 @@ function App() {
         )}
       </section>
 
+      {showMobileSubmitDock ? (
+        <section className={`card mobile-submit-dock ${isTimerVisible ? "with-timer" : "without-timer"}`.trim()}>
+          <button className="primary mobile-submit-btn" onClick={submitAnswer} disabled={isSubmitDisabled}>
+            {copy.submit}
+          </button>
+          {submitDisabledReason ? <p className="mobile-dock-hint" role="status" aria-live="polite">{submitDisabledReason}</p> : null}
+        </section>
+      ) : null}
+
       {isTimerVisible ? (
         <section className="card timer-banner timer-dock" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timerFillProgress * 100)}>
           <div className="timer-row">
@@ -1234,21 +1375,29 @@ function App() {
                 <div className="timer-fill" style={{ width: `${timerFillProgress * 100}%` }} />
               </div>
             </div>
-            {canPauseGame ? (
+            {room.state === "roundResults" ? (
               <button
                 className="pause-btn timer-action-btn"
-                onClick={room.state === "roundResults" ? nextRoundNow : togglePauseGame}
+                onClick={nextRoundNow}
+                disabled={!isHost}
               >
-                {timerActionLabel}
+                {copy.timerNext}
               </button>
             ) : (
-              room.state === "roundResults" ? <span className="timer-action-note">{copy.timerWaitingHost}</span> : null
+              canPauseGame ? (
+                <button
+                  className="pause-btn timer-action-btn"
+                  onClick={togglePauseGame}
+                >
+                  {timerActionLabel}
+                </button>
+              ) : null
             )}
           </div>
         </section>
       ) : null}
 
-      {error ? <p className="error fixed-error">{error}</p> : null}
+      {error ? <p className="error fixed-error" role="alert" aria-live="assertive">{error}</p> : null}
       {transitionOverlay}
       {floatingTooltipNode}
     </main>

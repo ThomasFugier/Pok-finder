@@ -418,8 +418,8 @@ export class GameEngine {
 
     const delayMs = Math.max(0, startDelayMs);
     const durationMs = room.settings.roundDurationSec * 1000;
-    room.roundStartsAt = now() + delayMs;
-    room.roundEndsAt = room.roundStartsAt + durationMs;
+    room.roundStartsAt = delayMs > 0 ? now() + delayMs : null;
+    room.roundEndsAt = (room.roundStartsAt || now()) + durationMs;
     this.setTicker(room);
     clearTimeout(room.roundTimer);
     room.roundTimer = setTimeout(() => {
@@ -648,7 +648,6 @@ export class GameEngine {
   }
 
   buildPublicState(room, viewerPlayerId = null) {
-    const hasRoundStarted = room.state !== "round" || !room.roundStartsAt || now() >= room.roundStartsAt;
     const expected = room.currentPokemon
       ? (room.settings.language === "fr" ? room.currentPokemon.fr : room.currentPokemon.en)
       : null;
@@ -673,7 +672,7 @@ export class GameEngine {
       roundEndsAt: room.roundEndsAt,
       phaseEndsAt: room.phaseEndsAt,
       players,
-      currentPokemon: room.currentPokemon && hasRoundStarted
+      currentPokemon: room.currentPokemon
         ? {
             id: room.currentPokemon.id,
             sprite: room.currentPokemon.sprite,

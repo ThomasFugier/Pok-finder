@@ -21,7 +21,8 @@ export function startLocalRound(room, { startDelayMs = 0 } = {}) {
   const players = clonePlayers(room.players).map((player) => ({ ...player, hasSubmitted: false, answer: "" }));
   const pickedPokemon = pickRandomPokemon(pokemonData, room.settings.generations, room.usedPokemonIds || []);
   const nextUsedPokemonIds = [...(room.usedPokemonIds || []), pickedPokemon.id];
-  const roundStartsAt = Date.now() + Math.max(0, startDelayMs);
+  const delayMs = Math.max(0, startDelayMs);
+  const roundStartsAt = delayMs > 0 ? Date.now() + delayMs : null;
 
   return {
     ...room,
@@ -31,7 +32,7 @@ export function startLocalRound(room, { startDelayMs = 0 } = {}) {
     currentPokemon: pickedPokemon,
     usedPokemonIds: nextUsedPokemonIds,
     roundStartsAt,
-    roundEndsAt: roundStartsAt + (room.settings.roundDurationSec * 1000),
+    roundEndsAt: (roundStartsAt || Date.now()) + (room.settings.roundDurationSec * 1000),
     phaseEndsAt: null,
     isPaused: false,
     pausedRemainingMs: 0,
